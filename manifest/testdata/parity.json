@@ -1,0 +1,95 @@
+[
+  {
+    "name": "valid-minimal",
+    "valid": true,
+    "manifest": {
+      "name": "notes",
+      "version": "1.0.0",
+      "entry": "server.js",
+      "health": true,
+      "access": "private",
+      "storage": { "kind": "sqlite" }
+    }
+  },
+  {
+    "name": "valid-full",
+    "valid": true,
+    "manifest": {
+      "name": "cbo-invoices",
+      "version": "1.4.0-rc.1",
+      "entry": "server.js",
+      "health": true,
+      "access": "org",
+      "storage": { "kind": "sqlite" },
+      "secrets": [
+        { "slot": "elma", "scope": "viewer" },
+        { "slot": "smtp", "scope": "app" }
+      ]
+    }
+  },
+  {
+    "name": "unknown-field",
+    "valid": false,
+    "manifest": {
+      "name": "notes",
+      "version": "1.0.0",
+      "entry": "server.js",
+      "health": true,
+      "access": "private",
+      "storage": { "kind": "sqlite" },
+      "debug": true
+    }
+  },
+  {
+    "name": "reserved-slug",
+    "valid": false,
+    "manifest": {
+      "name": "api",
+      "version": "1.0.0",
+      "entry": "server.js",
+      "health": true,
+      "access": "private",
+      "storage": { "kind": "sqlite" }
+    }
+  },
+  {
+    "name": "idn-prefix",
+    "valid": false,
+    "manifest": {
+      "name": "xn--notes",
+      "version": "1.0.0",
+      "entry": "server.js",
+      "health": true,
+      "access": "private",
+      "storage": { "kind": "sqlite" }
+    }
+  },
+  {
+    "name": "duplicate-secret",
+    "valid": false,
+    "manifest": {
+      "name": "notes",
+      "version": "1.0.0",
+      "entry": "server.js",
+      "health": true,
+      "access": "private",
+      "storage": { "kind": "sqlite" },
+      "secrets": [
+        { "slot": "token", "scope": "app" },
+        { "slot": "token", "scope": "viewer" }
+      ]
+    }
+  },
+  {
+    "name": "version-double-dot",
+    "valid": false,
+    "manifest": {
+      "name": "notes",
+      "version": "1.0.0-a..b",
+      "entry": "server.js",
+      "health": true,
+      "access": "private",
+      "storage": { "kind": "sqlite" }
+    }
+  }
+]

@@ -1,0 +1,51 @@
+{
+  "name": "@iskra/apps",
+  "version": "0.1.1",
+  "description": "SDK и CLI приложений Искры",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "iskra-app": "./dist/cli.js"
+  },
+  "files": [
+    "authoring",
+    "dist",
+    "examples",
+    "schema.json"
+  ],
+  "scripts": {
+    "sync:manifest": "node scripts/sync-manifest.mjs",
+    "check:manifest": "node scripts/sync-manifest.mjs --check",
+    "sync:styles": "node scripts/sync-styles.mjs",
+    "check:styles": "node scripts/sync-styles.mjs --check",
+    "build": "npm run sync:manifest && npm run sync:styles && tsc -p tsconfig.json",
+    "build:check": "npm run check:manifest && npm run check:styles && tsc -p tsconfig.json",
+    "test": "npm run build:check && node --test test/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@hono/node-server": "1.19.17",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "esbuild": "0.25.8",
+    "hono": "4.13.8",
+    "jose": "6.1.0",
+    "typescript": "5.9.2",
+    "yazl": "3.3.1",
+    "zod": "4.0.17"
+  },
+  "devDependencies": {
+    "@types/node": "24.2.1",
+    "@types/yazl": "3.3.0",
+    "json-schema-to-typescript": "15.0.4"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,1134 @@
+/* Общий визуальный слой приложений Искры.
+
+   Приложение получает его целиком: `appStylesheetResponse` отдаёт этот файл
+   маршрутом самого приложения, а `appPage` подключает ссылкой. Автору не нужно
+   ни писать оформление, ни класть файл в бандл — слой едет внутри @iskra/apps
+   и пристёгнут к версии бандла, как и остальные закрытые зависимости.
+
+   Палитра взята из design-guide Искры, чтобы приложение не выглядело чужим
+   рядом с ней: тёплый нейтральный фон, амбер единственным акцентом, границы
+   низкой контрастности. Значения продублированы здесь намеренно — бандл
+   приложения закрытый, тянуть стили Искры ему неоткуда.
+
+   Внешних ресурсов нет ни одного: рекомендуемая политика содержимого
+   (default-src 'self') загрузку со стороны запрещает, поэтому шрифт —
+   системный стек, знак бренда — inline SVG в разметке, а маркеры и крутилка
+   нарисованы средствами CSS.
+
+   Оформлены и голые элементы (main, h1, table, button, input), а не только
+   классы: экран, собранный без единого класса, обязан выглядеть законченным —
+   классы уточняют раскладку, а не включают её. */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #fbf9f7;
+  --panel: #f6f3f1;
+  --surface: #ffffff;
+  --surface-sunken: #faf8f6;
+
+  --text: #171717;
+  --text-soft: #6e6e6e;
+  --text-muted: #959595;
+
+  --border: rgb(55 50 47 / 12%);
+  --border-strong: rgb(55 50 47 / 22%);
+  --hover: rgb(131 121 114 / 10%);
+
+  --accent: #aa5c03;
+  --accent-hover: #d97706;
+  --accent-contrast: #ffffff;
+  --accent-soft: rgb(253 205 166 / 35%);
+  --accent-border: rgb(170 92 3 / 35%);
+
+  --success: #047857;
+  --success-soft: rgb(4 120 87 / 10%);
+  --danger: #dc2626;
+  --danger-soft: rgb(220 38 38 / 10%);
+  --danger-border: rgb(220 38 38 / 25%);
+
+  --radius: 10px;
+  --radius-sm: 7px;
+  --shadow: 0 1px 2px rgb(23 23 23 / 4%), 0 4px 16px rgb(23 23 23 / 5%);
+
+  --font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --page-width: 1180px;
+
+  /* Цвета шапки. В базе шапка — та же панель, что и боковое меню; стиль
+     «Строгий» делает её тёмной, не трогая --panel. Ссылки на токены
+     вычисляются на :root, поэтому следуют и за тёмной темой, и за стилем. */
+  --bar-bg: var(--panel);
+  --bar-text: var(--text);
+  --bar-text-soft: var(--text-soft);
+  --bar-hover: var(--hover);
+  --bar-border: var(--border);
+}
+
+/* Тёмная тема идёт по системной настройке: приложение открывают из Искры, и
+   собственного переключателя у него нет — расхождение с окном вокруг читалось
+   бы как чужая вкладка. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1d1d1c;
+    --panel: #191818;
+    --surface: #2b2a29;
+    --surface-sunken: #232221;
+
+    --text: #ffffff;
+    --text-soft: #bfbfbf;
+    --text-muted: #858585;
+
+    --border: rgb(232 224 217 / 12%);
+    --border-strong: rgb(241 239 237 / 22%);
+    --hover: rgb(170 165 160 / 10%);
+
+    --accent: #f4cd74;
+    --accent-hover: #eaba4d;
+    --accent-contrast: #1d1d1c;
+    --accent-soft: rgb(199 93 7 / 22%);
+    --accent-border: rgb(244 205 116 / 35%);
+
+    --success: #3dd2a8;
+    --success-soft: rgb(61 210 168 / 12%);
+    --danger: #ff4848;
+    --danger-soft: rgb(255 72 72 / 12%);
+    --danger-border: rgb(255 72 72 / 28%);
+
+    --shadow: 0 1px 2px rgb(0 0 0 / 20%), 0 4px 16px rgb(0 0 0 / 24%);
+  }
+}
+
+/* ── Стили оформления ──────────────────────────────────────────────────── */
+
+/* Стиль — атрибут data-style на <html>, который ставит appPage. Блок стиля
+   переопределяет только токены: компоненты ниже одни на все стили.
+
+   Селектор :root[data-style=…] сильнее тёмного :root внутри @media, поэтому
+   тёмный блок стиля обязан переопределять ВСЕ токены светлого блока того же
+   стиля: пропущенный токен остался бы светлым на тёмном фоне. Паритет
+   наборов сверяет тест SDK.
+
+   Контраст (WCAG, вычислен по формуле относительной яркости), все ≥ 4.5:1:
+   strict, светлая:  --accent #2f5d8a / --accent-contrast #ffffff   6.88
+                     --accent-hover #244a70 / #ffffff               9.18
+                     --bar-text #e8edf3 / --bar-bg #1f2a37         12.35
+                     --bar-text-soft #aab6c3 / --bar-bg #1f2a37     7.05
+                     --text #1b2430 / --bg #f4f6f8                 14.45
+   strict, тёмная:   --accent #7fb0e0 / --accent-contrast #0f151b   8.04
+                     --accent-hover #9cc3ea / #0f151b               9.98
+                     --bar-text #e8edf3 / --bar-bg #0f151b         15.60
+                     --bar-text-soft #aab6c3 / --bar-bg #0f151b     8.91
+                     --text #e8edf3 / --bg #141a21                 14.87
+   showcase, светлая: --accent #c2461d / --accent-contrast #ffffff  5.01
+                     --accent-hover #a63a15 / #ffffff               6.49
+                     --text #2a1a0f / шапка #fff8ee                15.89
+                     --text-soft #7a5a44 / шапка #fff8ee            5.90
+                     --accent #c2461d / --bg #fff8ee (ссылка)       4.76
+   showcase, тёмная: --accent #ff9a6b / --accent-contrast #1f1712   8.48
+                     --accent-hover #ffb28e / #1f1712              10.10
+                     --text #fbeee0 / шапка #1f1712                15.47
+                     --text-soft #d2b8a3 / шапка #1f1712            9.35 */
+
+/* «Строгий»: плотный, для учёта и отчётов — холодный серо-синий, мелкий
+   радиус, тёмная шапка. */
+:root[data-style="strict"] {
+  --bg: #f4f6f8;
+  --panel: #eef1f4;
+  --surface: #ffffff;
+  --surface-sunken: #f7f9fb;
+
+  --text: #1b2430;
+  --text-soft: #556270;
+  --text-muted: #7d8a98;
+
+  --border: rgb(27 36 48 / 12%);
+  --border-strong: rgb(27 36 48 / 22%);
+  --hover: rgb(47 93 138 / 8%);
+
+  --accent: #2f5d8a;
+  --accent-hover: #244a70;
+  --accent-contrast: #ffffff;
+  --accent-soft: rgb(47 93 138 / 12%);
+  --accent-border: rgb(47 93 138 / 35%);
+
+  --radius: 4px;
+  --radius-sm: 3px;
+  --font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --bar-bg: #1f2a37;
+  --bar-text: #e8edf3;
+  --bar-text-soft: #aab6c3;
+  --bar-hover: rgb(232 237 243 / 10%);
+  --bar-border: rgb(232 237 243 / 22%);
+}
+
+/* «Витрина»: крупный, для клиентов — светлый тёплый фон, крупный кегль,
+   большой радиус, засечки в заголовках, коралловый акцент. */
+:root[data-style="showcase"] {
+  --bg: #fff8ee;
+  --panel: #fff8ee;
+  --surface: #ffffff;
+  --surface-sunken: #fdf1e2;
+
+  --text: #2a1a0f;
+  --text-soft: #7a5a44;
+  --text-muted: #a88c77;
+
+  --border: rgb(122 70 30 / 14%);
+  --border-strong: rgb(122 70 30 / 26%);
+  --hover: rgb(194 70 29 / 8%);
+
+  --accent: #c2461d;
+  --accent-hover: #a63a15;
+  --accent-contrast: #ffffff;
+  --accent-soft: rgb(224 88 43 / 14%);
+  --accent-border: rgb(194 70 29 / 35%);
+
+  --radius: 16px;
+  --radius-sm: 12px;
+  --font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: Georgia, "Times New Roman", serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-style="strict"] {
+    --bg: #141a21;
+    --panel: #10161c;
+    --surface: #1c242e;
+    --surface-sunken: #182028;
+
+    --text: #e8edf3;
+    --text-soft: #aab6c3;
+    --text-muted: #7d8a98;
+
+    --border: rgb(232 237 243 / 12%);
+    --border-strong: rgb(232 237 243 / 22%);
+    --hover: rgb(170 182 195 / 10%);
+
+    --accent: #7fb0e0;
+    --accent-hover: #9cc3ea;
+    --accent-contrast: #0f151b;
+    --accent-soft: rgb(127 176 224 / 16%);
+    --accent-border: rgb(127 176 224 / 35%);
+
+    --radius: 4px;
+    --radius-sm: 3px;
+    --font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+    --bar-bg: #0f151b;
+    --bar-text: #e8edf3;
+    --bar-text-soft: #aab6c3;
+    --bar-hover: rgb(232 237 243 / 10%);
+    --bar-border: rgb(232 237 243 / 20%);
+  }
+
+  :root[data-style="showcase"] {
+    --bg: #1f1712;
+    --panel: #1f1712;
+    --surface: #2a2019;
+    --surface-sunken: #251b15;
+
+    --text: #fbeee0;
+    --text-soft: #d2b8a3;
+    --text-muted: #a08a78;
+
+    --border: rgb(251 238 224 / 12%);
+    --border-strong: rgb(251 238 224 / 22%);
+    --hover: rgb(255 154 107 / 10%);
+
+    --accent: #ff9a6b;
+    --accent-hover: #ffb28e;
+    --accent-contrast: #1f1712;
+    --accent-soft: rgb(255 154 107 / 16%);
+    --accent-border: rgb(255 154 107 / 35%);
+
+    --radius: 16px;
+    --radius-sm: 12px;
+    --font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-display: Georgia, "Times New Roman", serif;
+  }
+}
+
+/* Засечки только у заголовков «Витрины»: токен задан лишь её блоками, и
+   правило ограничено стилем, чтобы остальные заголовки наследовали шрифт. */
+:root[data-style="showcase"] :is(h1, h2, .app-bar__title) {
+  font-family: var(--font-display);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font: var(--font);
+  margin: 0;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* [hidden] обязан побеждать любой display этого файла: правило браузера
+   авторскому проигрывает, и скрытый элемент с собственным display остаётся на
+   экране. */
+[hidden] {
+  display: none !important;
+}
+
+/* ── Каркас экрана ─────────────────────────────────────────────────────── */
+
+/* Шапка липкая: рабочий список обычно длиннее экрана, и без неё переход в
+   соседний раздел требует прокрутки в начало. */
+.app-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 14px;
+  padding: 14px 24px;
+  background: var(--bar-bg);
+  border-bottom: 1px solid var(--border);
+  /* Внутри шапки текстовые токены переназначены на токены шапки: бренд,
+     название, навигация и зритель читаются и на тёмной шапке «Строгого»;
+     граница — тоже, иначе обводка текущего пункта навигации на ней пропадает. */
+  --text: var(--bar-text);
+  --text-soft: var(--bar-text-soft);
+  --hover: var(--bar-hover);
+  --border: var(--bar-border);
+  color: var(--text);
+}
+
+/* Бренд ведёт в раздел приложений Искры — дорога назад из открытого
+   приложения. Знак рисует inline SVG, цвета — классы ниже: атрибут style
+   политика содержимого запрещает. */
+.app-bar__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 8px 3px 4px;
+  margin-left: -4px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-soft);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+a.app-bar__brand:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.app-bar__brand b {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.app-bar__logo {
+  flex: none;
+}
+
+.app-bar__logo-bg {
+  fill: var(--accent);
+}
+
+.app-bar__logo-spark {
+  fill: var(--accent-contrast);
+}
+
+.app-bar__sep {
+  color: var(--text-muted);
+}
+
+.app-bar__title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  min-width: 0;
+}
+
+.app-bar__spacer {
+  flex: 1 1 auto;
+}
+
+/* Зритель: кто смотрит приложение. Только показ — доступ решает JWT. */
+.app-bar__viewer {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+/* Длинное имя обрезается многоточием, а не распирает шапку шире окна. */
+.app-bar__viewer-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-bar__avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  flex: none;
+}
+
+/* На узкой ширине бренд, навигация и зритель остаются первой строкой, а
+   название уходит второй во всю ширину. */
+@media (max-width: 560px) {
+  .app-bar__sep {
+    display: none;
+  }
+
+  .app-bar__title {
+    order: 1;
+    flex: 1 0 100%;
+  }
+
+  /* Остаётся аватар; имя скрыто только визуально — программа чтения экрана
+     его читает, а мышь видит подсказку title. */
+  .app-bar__viewer-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+/* Полоса содержимого задаётся элементом, а не классом: экран без единого
+   класса обязан быть свёрстан. .page — то же самое явно, для разметки, где
+   main занят другим. */
+main,
+.page {
+  max-width: var(--page-width);
+  margin: 0 auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Список во всю ширину окна: восемь колонок в 1180 пикселях сжимают текстовые
+   до неузнаваемости, при том что место на мониторе есть. */
+.page--wide {
+  max-width: none;
+}
+
+main > h1,
+.page > h1 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+main > h2,
+.page > h2 {
+  margin: 8px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* Мера строки: на широком мониторе строка в 200 символов теряется при возврате
+   к началу. Ограничение берут только абзацы без класса — классом размечают и
+   строку кнопок, и строку состояния, а им ширина нужна своя. */
+main > p:not([class]),
+.page > p:not([class]),
+.hint {
+  max-width: 70ch;
+}
+
+/* Пояснение к экрану: тон ниже данных, иначе спорит с ними за внимание. */
+.hint {
+  color: var(--text-soft);
+  margin: 0;
+}
+
+/* ── Ссылки и навигация ────────────────────────────────────────────────── */
+
+a {
+  color: var(--accent);
+  text-decoration-color: var(--accent-border);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+}
+
+.nav a {
+  padding: 5px 11px;
+  border-radius: 999px;
+  color: var(--text-soft);
+  text-decoration: none;
+  border: 1px solid transparent;
+}
+
+.nav a:hover,
+.nav a[aria-current="page"] {
+  color: var(--text);
+  background: var(--hover);
+  border-color: var(--border);
+}
+
+.nav a[aria-current="page"] {
+  font-weight: 600;
+}
+
+/* ── Карточка ──────────────────────────────────────────────────────────── */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.card--pad {
+  padding: 16px;
+}
+
+/* Карточка под таблицу «подпись — число»: во всю ширину страницы она выглядит
+   пустой, потому что данных в ней два столбца. */
+.card--narrow {
+  max-width: 560px;
+}
+
+/* ── Кнопки ────────────────────────────────────────────────────────────── */
+
+/* Три роли: обычное действие (по умолчанию), главное действие экрана
+   (.btn-primary) и разрушительное (.btn-danger). Четвёртой роли нет намеренно —
+   экран, где выделены все кнопки, не выделяет ни одной. */
+button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: inherit;
+  font-weight: 500;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+/* Фокус виден только с клавиатуры: кольцо после каждого клика мышью читается
+   как «элемент остался активным» и сбивает при быстрой работе. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-danger {
+  color: var(--danger);
+  border-color: var(--danger-border);
+  background: transparent;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+/* Действие внутри строки таблицы: меньше основной кнопки, чтобы не спорить с
+   действием всего экрана. */
+.btn-row {
+  margin-left: 10px;
+  padding: 3px 10px;
+  font-size: 12.5px;
+  border-radius: 999px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+}
+
+/* Вертикальная стопка с одинаковым просветом: без неё соседние блоки внутри
+   карточки слипаются, а собственные margin у каждого из них разъезжаются по
+   значениям. */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Панель действий: кнопки и строка состояния одной строкой. Сообщение стоит
+   справа от кнопок, а не под ними: под кнопкой оно отодвигает содержимое вниз
+   ровно в тот момент, когда человек целится в следующую строку списка. На
+   узком экране строка переносится, сообщение уходит под кнопки. */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.toolbar .actions {
+  flex: 0 0 auto;
+}
+
+/* Остаток ширины отдаётся сообщению; 320px — порог, ниже которого оно уже не
+   читается в строку и уезжает на следующую. */
+.toolbar .status {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+/* ── Строка состояния ──────────────────────────────────────────────────── */
+
+/* Высота держится всегда: появление сообщения дёргало бы кнопки и таблицу вниз
+   ровно в тот момент, когда человек целится в кнопку. */
+.status {
+  min-height: 34px;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  color: var(--text-soft);
+}
+
+.status--ok,
+.status--warn,
+.status--error {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid transparent;
+}
+
+/* Итог действия и отказ различаются цветом: «Добавлено документов: 12» тем же
+   красным, что и «источник недоступен», читается как ошибка. */
+.status--ok {
+  color: var(--success);
+  background: var(--success-soft);
+  border-left-color: var(--success);
+}
+
+/* Частичный результат — не отказ и не успех. */
+.status--warn {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+
+.status--error {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-left-color: var(--danger);
+}
+
+/* ── Таблицы ───────────────────────────────────────────────────────────── */
+
+.table-wrap {
+  overflow: auto;
+  border-radius: var(--radius);
+}
+
+table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  /* Суммы и количества выравниваются по разряду: пропорциональные цифры в
+     столбце чисел читаются как числа разной длины. */
+  font-variant-numeric: tabular-nums;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--surface-sunken);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+tbody tr:hover td {
+  background: var(--hover);
+}
+
+/* Числовая колонка: правое выравнивание и запрет переноса. «49656.24»,
+   разорванное на две строки, читается как два разных числа. */
+td.num,
+th.num {
+  text-align: right;
+}
+
+td.num {
+  white-space: nowrap;
+}
+
+/* Таблица «подпись — число»: во всю ширину экрана число уезжает от своей
+   подписи на полметра монитора, и строку приходится читать линейкой. */
+.pairs {
+  max-width: 520px;
+}
+
+.pairs td:last-child,
+.pairs th:last-child {
+  text-align: right;
+}
+
+/* Пустой список — это состояние, а не отсутствие ответа: таблица с одними
+   заголовками выглядит как незагрузившийся экран. */
+.empty {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 28px 14px;
+}
+
+/* ── Бейджи ────────────────────────────────────────────────────────────── */
+
+/* Состояние пилюлей: в колонке из одинаковых слов глаз ищет нужную строку
+   дольше, чем по цветовому пятну. Варианты названы по значению, а не по
+   состоянию предметной области: приложение сопоставляет свои состояния
+   значениям, и палитра не растёт вместе с их числом. */
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--text-soft);
+  background: var(--hover);
+  border: 1px solid var(--border);
+}
+
+.badge--accent {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.badge--success {
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: transparent;
+}
+
+.badge--danger {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+
+/* Пометка рядом с бейджем — не часть состояния: своим цветом она спорила бы с
+   пилюлей, поэтому идёт тоном ниже и рядом. */
+.badge-note {
+  margin-left: 6px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+/* ── Поля формы ────────────────────────────────────────────────────────── */
+
+/* Раздел группирует поля по смыслу: пятнадцать полей подряд без деления
+   читаются как анкета, в которой каждый раз ищешь нужную строку заново. */
+.section__title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.fields-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.field {
+  display: block;
+  margin: 0;
+  min-width: 0;
+}
+
+/* Поле во всю ширину сетки: адрес или наименование в две колонки не помещается
+   и переносится там, где переносить нечего. */
+.field--wide {
+  grid-column: 1 / -1;
+}
+
+.field__label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12.5px;
+  color: var(--text-soft);
+}
+
+input,
+select,
+textarea {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+}
+
+/* Одиночное поле не растягивается во всю ширину экрана: строка ввода в тысячу
+   пикселей читается как промах раскладки, а не как приглашение писать длинно.
+   В сетке ширину задаёт колонка, поэтому там ограничение снимается. */
+input,
+select,
+textarea {
+  max-width: 32rem;
+}
+
+.field input,
+.field select,
+.field textarea {
+  max-width: none;
+}
+
+fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Незаполненное поле видно до всякой проверки: искать его перечитыванием формы
+   — самая долгая часть работы. Подсветка снимается сама, как только в поле
+   появляется значение. */
+.is-empty {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+/* Отказ приёмника поверх подсветки: красный говорит «это уже отправляли и не
+   приняли», рыжий — «здесь пусто». */
+.invalid {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+/* ── Крутилка длительного действия ─────────────────────────────────────── */
+
+/* Показывается классом is-busy на самом действии: отдельная строка состояния
+   уводит взгляд с того места, куда человек только что нажал. Кнопка на это
+   время выключена, но приглушена меньше обычного disabled — иначе анимация
+   читается как подвисшая. */
+.spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  opacity: 0.75;
+  animation: spin 0.7s linear infinite;
+}
+
+.is-busy .spinner {
+  display: inline-block;
+}
+
+button.is-busy:disabled {
+  opacity: 0.8;
+  cursor: progress;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Уважение к настройке «меньше движения»: вращение остаётся признаком работы,
+   но перестаёт мельтешить. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.4s;
+  }
+}
+
+/* ── Раскладки макетов ─────────────────────────────────────────────────── */
+
+/* Меню слева (navPosition: "side"): шапка во всю ширину, под ней меню и
+   содержимое. Разделов больше, чем помещается в строку шапки. */
+.app-shell--side {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  min-height: 100vh;
+}
+
+.app-shell--side > .app-bar {
+  grid-column: 1 / -1;
+}
+
+.app-shell--side > main {
+  width: 100%;
+}
+
+.side-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 10px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+
+.side-nav a {
+  display: block;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  color: var(--text-soft);
+  text-decoration: none;
+}
+
+.side-nav a:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.side-nav a[aria-current="page"] {
+  color: var(--text);
+  background: var(--hover);
+  font-weight: 600;
+}
+
+/* Плитки цифр дашборда: сколько влезет в строку, не уже 160px. */
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.kpi__label {
+  font-size: 12.5px;
+  color: var(--text-soft);
+}
+
+.kpi__value {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* «Список + карточка»: список уже карточки, на узком — одна колонка. */
+.split {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: 16px;
+  align-items: start;
+}
+
+/* Выбираемый список: выбранная строка помечается aria-current="true". */
+.list-select {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.list-select__item {
+  display: block;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.list-select__item:hover {
+  background: var(--hover);
+}
+
+.list-select__item[aria-current="true"] {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+  font-weight: 600;
+}
+
+/* Шаги мастера: пройденные, текущий и оставшиеся различаются кружком. */
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.step {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  counter-increment: step;
+}
+
+.step::before {
+  content: counter(step);
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+}
+
+.step--done {
+  color: var(--text-soft);
+}
+
+.step--done::before {
+  content: "✓";
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.step--current {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.step--current::before {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+@media (max-width: 720px) {
+  .app-shell--side {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto 1fr;
+  }
+
+  /* Меню становится горизонтальной полосой под шапкой. */
+  .side-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 8px 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .side-nav a {
+    white-space: nowrap;
+  }
+
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── Узкое окно ────────────────────────────────────────────────────────── */
+
+@media (max-width: 700px) {
+  main,
+  .page {
+    padding: 16px;
+  }
+
+  .app-bar {
+    padding: 12px 16px;
+  }
+
+  .fields-grid {
+    grid-template-columns: 1fr;
+  }
+}

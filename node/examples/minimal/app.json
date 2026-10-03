@@ -1,0 +1,8 @@
+{
+  "name": "hello-iskra",
+  "version": "1.0.0",
+  "entry": "server.js",
+  "health": true,
+  "access": "private",
+  "storage": { "kind": "sqlite" }
+}

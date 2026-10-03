@@ -1,0 +1,8 @@
+{
+  "name": "stage-f-demo",
+  "version": "9.9.9-bad",
+  "entry": "server.js",
+  "health": true,
+  "access": "private",
+  "storage": { "kind": "sqlite" }
+}

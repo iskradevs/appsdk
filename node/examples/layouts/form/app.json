@@ -1,0 +1,8 @@
+{
+  "name": "layout-form",
+  "version": "0.1.0",
+  "entry": "server.js",
+  "health": true,
+  "access": "private",
+  "storage": { "kind": "sqlite" }
+}
