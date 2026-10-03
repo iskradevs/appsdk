@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
-import { build } from "esbuild";
+import { authoringExample } from "./fixtures/authoring-example.mjs";
 
 const sdkRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -35,53 +35,22 @@ async function exampleFixture(
   });
   await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
-  const previousURL = process.env.ISKRA_API_URL;
-  const previousBase = process.env.APP_BASE_PATH;
-  process.env.ISKRA_API_URL = `http://127.0.0.1:${upstream.address().port}`;
-  process.env.APP_BASE_PATH = "/interactive";
-  t.after(() => {
-    if (previousURL === undefined) delete process.env.ISKRA_API_URL;
-    else process.env.ISKRA_API_URL = previousURL;
-    if (previousBase === undefined) delete process.env.APP_BASE_PATH;
-    else process.env.APP_BASE_PATH = previousBase;
-  });
-  const bundle = await build({
-    stdin: {
-      contents: `import ${JSON.stringify(join(sdkRoot, "examples/interactive/src/server.ts"))}; export { handler } from "example-listener";`,
-      resolveDir: sdkRoot,
+  const fixture = await authoringExample(t, join(sdkRoot, "examples/interactive"), {
+    env: {
+      ISKRA_API_URL: `http://127.0.0.1:${upstream.address().port}`,
+      APP_BASE_PATH: "/interactive",
     },
-    bundle: true,
-    write: false,
-    format: "esm",
-    platform: "node",
-    target: "node24",
-    alias: { "@iskra/apps": join(sdkRoot, "dist/index.js") },
-    plugins: [
-      {
-        name: "capture-example-listener",
-        setup(plugin) {
-          plugin.onResolve({ filter: /^(@hono\/node-server|example-listener)$/ }, () => ({
-            path: "listener",
-            namespace: "example",
-          }));
-          plugin.onLoad({ filter: /.*/, namespace: "example" }, () => ({
-            contents: "export let handler; export function serve(options) { handler = options.fetch; }",
-          }));
-        },
-      },
-    ],
   });
-  const { handler } = await import(
-    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}#${webcrypto.randomUUID()}`
-  );
-  const request = (path, init = {}) => handler(new Request(`http://example.test/interactive/${path}`, init));
+  const request = fixture.request;
   const post = (body) =>
     request("run", {
       method: "POST",
       headers: { "content-type": "application/json", "X-Iskra-Identity": "viewer.jwt" },
       body,
     });
-  const script = await (await request("screen.js")).text();
+  const asset = await request("screen.js");
+  assert.equal(asset.status, 200);
+  const script = await asset.text();
   return {
     calls,
     post,
@@ -104,7 +73,8 @@ async function exampleFixture(
       };
       runInNewContext(script, {
         document: {
-          querySelector: (selector) => ({ "#ask": form, "#status": status, "#result": output })[selector],
+          querySelector: (selector) =>
+            ({ "#ask": form, "#status": status, "#result": output })[selector],
         },
         FormData: class {
           get() {

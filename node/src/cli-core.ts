@@ -1,7 +1,8 @@
 import { builtinModules } from "node:module";
 import { createWriteStream } from "node:fs";
-import { cp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { build, type Plugin } from "esbuild";
@@ -35,6 +36,7 @@ export interface BuildOptions {
   readonly outDir?: string;
   readonly closedDependencies?: boolean;
 }
+export type PackOptions = Omit<BuildOptions, "outDir">;
 export interface PublishOptions {
   readonly apiUrl: string;
   readonly apiKey: string;
@@ -63,70 +65,58 @@ export async function scaffoldApp(projectDir: string, options: ScaffoldOptions):
   const target = resolve(projectDir);
   await mkdir(join(target, "src"), { recursive: true });
   await mkdir(join(target, "static"), { recursive: true });
-  // Макет несёт свой app.json: из него меняется только имя.
-  const manifest =
-    layout === undefined
-      ? {
-          name: options.name,
-          version: "0.1.0",
-          entry: "server.js",
-          health: true,
-          access: "private",
-          storage: { kind: "sqlite" },
-        }
-      : {
-          ...(JSON.parse(await readFile(join(layoutDir(layout), "app.json"), "utf8")) as object),
-          name: options.name,
-        };
+  // Пример несёт свой манифест; новый минимальный проект начинает с 0.1.0.
+  const source = exampleDir(layout);
+  const manifest = {
+    ...(JSON.parse(await readFile(join(source, "app.json"), "utf8")) as object),
+    name: options.name,
+    ...(layout === undefined ? { version: "0.1.0" } : {}),
+  };
   parseManifest(manifest);
   await writeFile(join(target, "app.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
     flag: "wx",
   });
-  if (layout === undefined) {
-    await writeFile(join(target, "src/server.ts"), scaffoldServer(options.name, style), {
-      flag: "wx",
-    });
-    return;
-  }
-  await copyLayoutSources(layout, target, options.name, style);
+  await copyExampleSources(source, target, options.name, style);
 }
 
-// Каталог макета — examples/layouts/<id> пакета; от dist/cli-core.js это
-// ../examples, и npm-пакет публикует examples вместе с dist.
-const layoutDir = (layout: AppLayout): string =>
-  fileURLToPath(new URL(`../examples/layouts/${layout}`, import.meta.url));
+// npm-пакет публикует examples рядом с dist; init использует те же примеры,
+// которые автор может скачать и собрать самостоятельно.
+const exampleDir = (layout: AppLayout | undefined): string =>
+  fileURLToPath(new URL(`../examples/${layout ? `layouts/${layout}` : "minimal"}`, import.meta.url));
 
-// copyLayoutSources — src/** примера макета в новый проект. В server.ts
-// подменяются ровно две строки-параметра: имя (запасное название экрана) и
-// стиль. Остальные файлы копируются как есть; существующие не перезаписываются.
-// См. docs/plans/2026-09-29-apps-ui-polish-design.md — «SDK».
-async function copyLayoutSources(
-  layout: AppLayout,
+// Копируются все авторские src/** и static/** с исключительной записью;
+// имя и стиль подставляются только в модуль параметров.
+// См. docs/plans/2026-10-03-apps-authoring-workspace-design.md — «Авторская структура».
+async function copyExampleSources(
+  source: string,
   target: string,
   name: string,
   style: AppStyle,
 ): Promise<void> {
-  const sourceDir = join(layoutDir(layout), "src");
-  const server = await readFile(join(sourceDir, "server.ts"), "utf8");
+  const config = await readFile(join(source, "src/config.ts"), "utf8");
   const patched = replaceOnce(
     replaceOnce(
-      server,
-      /^const APP_NAME = "[^"]*";$/m,
-      `const APP_NAME = ${JSON.stringify(name)};`,
+      config,
+      /^export const APP_NAME = "[^"]*";$/m,
+      `export const APP_NAME = ${JSON.stringify(name)};`,
     ),
-    /^const APP_STYLE: AppStyle = "[^"]*";$/m,
-    `const APP_STYLE: AppStyle = ${JSON.stringify(style)};`,
+    /^export const APP_STYLE: AppStyle = "[^"]*";$/m,
+    `export const APP_STYLE: AppStyle = ${JSON.stringify(style)};`,
   );
-  // Поэлементно: cp каталога в уже созданный src/ отказал бы на самом src/.
-  for (const entry of await readdir(sourceDir)) {
-    if (entry === "server.ts") continue;
-    await cp(join(sourceDir, entry), join(target, "src", entry), {
-      recursive: true,
-      force: false,
-      errorOnExist: true,
-    });
+  // Корневые каталоги уже созданы; каждый существующий файл сохраняется.
+  for (const tree of ["src", "static"]) {
+    const sourceDir = join(source, tree);
+    if (!(await exists(sourceDir))) continue;
+    for (const entry of await readdir(sourceDir)) {
+      if (tree === "src" && entry === "config.ts") continue;
+      await cp(join(sourceDir, entry), join(target, tree, entry), {
+        recursive: true,
+        force: false,
+        errorOnExist: true,
+      });
+    }
   }
-  await writeFile(join(target, "src/server.ts"), patched, { flag: "wx" });
+  await writeFile(join(target, "src/config.ts"), patched, { flag: "wx" });
 }
 
 // replaceOnce — замена строки-параметра, которая обязана встретиться ровно
@@ -152,6 +142,11 @@ export async function buildApp(projectDir: string, options: BuildOptions = {}): 
   assertWithin(root, outDir, "build output");
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
+  await bundleApp(root, outDir, options);
+  return outDir;
+}
+
+async function bundleApp(root: string, outDir: string, options: PackOptions): Promise<void> {
   const plugins = [rejectNativeModules()];
   if (options.closedDependencies) plugins.unshift(closedDependencyPlugin(await realpath(root)));
   await build({
@@ -168,7 +163,115 @@ export async function buildApp(projectDir: string, options: BuildOptions = {}): 
   await cp(join(root, "app.json"), join(outDir, "app.json"));
   const staticDir = join(root, "static");
   if (await exists(staticDir)) await cp(staticDir, join(outDir, "static"), { recursive: true });
-  return outDir;
+}
+
+// Автоматическая упаковка владеет временным staging: авторский каталог остаётся
+// источником правды, а прежний ручной build удаляется после готового ZIP.
+export async function packProject(
+  projectDir: string,
+  outputPath: string,
+  options: PackOptions = {},
+): Promise<void> {
+  const root = resolve(projectDir);
+  await checkApp(root);
+  const legacy = join(root, ".iskra-build");
+  const output = resolve(outputPath);
+  await assertArchiveOutsideLegacy(legacy, output);
+  const manifest = parseManifest(JSON.parse(await readFile(join(root, "app.json"), "utf8")));
+  const retireLegacy = await checkLegacyBuild(legacy, manifest.name);
+  const staging = await mkdtemp(join(tmpdir(), "iskra-app-pack-"));
+  try {
+    await bundleApp(root, staging, options);
+    await packApp(staging, output);
+    if (retireLegacy) {
+      const currentLegacy = await checkLegacyBuild(legacy, manifest.name);
+      if (
+        !currentLegacy ||
+        currentLegacy.device !== retireLegacy.device ||
+        currentLegacy.inode !== retireLegacy.inode
+      ) {
+        throw new Error(".iskra-build изменился во время сборки; проверь и перемести каталог перед упаковкой");
+      }
+      await rm(legacy, { recursive: true });
+    }
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+async function assertArchiveOutsideLegacy(legacy: string, output: string): Promise<void> {
+  if (
+    isWithinOrEqual(legacy, output) ||
+    isWithinOrEqual(await resolvePotentialPath(legacy), await resolvePotentialPath(output))
+  ) {
+    throw new Error("output ZIP обязан находиться вне .iskra-build; выбери другой --output");
+  }
+}
+
+// realpath ближайшего существующего родителя проверяет также пути к ещё
+// не созданному архиву. Отдельно раскрываем ссылку на отсутствующий файл.
+async function resolvePotentialPath(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if (!isMissingPath(error)) throw error;
+  }
+  const info = await lstat(path).catch((error: unknown) => {
+    if (!isMissingPath(error)) throw error;
+    return undefined;
+  });
+  if (info?.isSymbolicLink()) {
+    return resolvePotentialPath(resolve(dirname(path), await readlink(path)));
+  }
+  const parent = dirname(path);
+  if (parent === path) throw new Error(`не удалось разрешить путь ${path}`);
+  return join(await resolvePotentialPath(parent), basename(path));
+}
+
+async function checkLegacyBuild(
+  legacy: string,
+  appName: string,
+): Promise<{ device: number; inode: number } | undefined> {
+  const info = await lstat(legacy).catch((error: unknown) => {
+    if (!isMissingPath(error)) throw error;
+    return undefined;
+  });
+  if (!info) return undefined;
+  try {
+    if (!info.isDirectory()) throw new Error("ожидался обычный каталог");
+    for (const required of ["app.json", "server.js"]) {
+      if (!(await lstat(join(legacy, required))).isFile())
+        throw new Error(`${required} обязан быть обычным файлом`);
+    }
+    for (const name of await readdir(legacy)) {
+      if (name === "app.json" || name === "server.js") continue;
+      if (name !== "static") throw new Error(`неизвестный файл ${name}`);
+      await checkLegacyStatic(join(legacy, name));
+    }
+    const manifest = parseManifest(JSON.parse(await readFile(join(legacy, "app.json"), "utf8")));
+    if (manifest.name !== appName) throw new Error("имя приложения отличается от авторского");
+    return { device: info.dev, inode: info.ino };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `.iskra-build не распознан как прежний результат сборки: ${reason}; проверь и перемести ${legacy} перед упаковкой`,
+      { cause: error },
+    );
+  }
+}
+
+async function checkLegacyStatic(path: string): Promise<void> {
+  if (!(await lstat(path)).isDirectory()) throw new Error(`${path} обязан быть обычным каталогом`);
+  for (const name of await readdir(path)) {
+    const child = join(path, name);
+    const info = await lstat(child);
+    if (info.isDirectory()) await checkLegacyStatic(child);
+    else if (!info.isFile()) throw new Error(`${child} обязан быть обычным файлом или каталогом`);
+  }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 export async function packApp(buildDir: string, outputPath: string): Promise<void> {
@@ -620,60 +723,3 @@ async function exists(path: string): Promise<boolean> {
 function wait(ms: number): Promise<void> {
   return new Promise((resolveWait) => setTimeout(resolveWait, ms));
 }
-
-// scaffoldServer — src/server.ts нового приложения. name — имя из манифеста: оно
-// же запасное название экрана, пока запрос идёт мимо роутера (проба узла,
-// локальный запуск).
-const scaffoldServer = (
-  name: string,
-  style: AppStyle,
-): string => `import { serve } from "@hono/node-server";
-import { Hono } from "hono";
-import {
-  APP_CSP,
-  APP_STYLESHEET_PATH,
-  appBasePath,
-  appPage,
-  appStylesheetResponse,
-  appTitle,
-} from "@iskra/apps";
-
-// strict: false — обязательное условие публикации: узел проверяет кандидата
-// запросом в корень приложения СО слэшем ("/\${slug}/"), и роутер потом водит
-// туда же зрителей. Hono по умолчанию считает "/\${slug}" и "/\${slug}/"
-// разными путями, поэтому строгий роутер отвечает пробе 404, и версия не
-// публикуется.
-const app = new Hono({ strict: false });
-const ui = new Hono();
-
-// Политика содержимого нужна каждому ответу экрана, поэтому middleware стоит
-// первым: зарегистрированный после маршрута, к нему Hono уже не применится.
-ui.use("*", async (context, next) => {
-  await next();
-  context.header("Content-Security-Policy", APP_CSP);
-  context.header("X-Content-Type-Options", "nosniff");
-});
-
-app.get("/healthz", (context) => context.json({ ok: true }));
-
-// Общий стиль приложений едет внутри @iskra/apps и отдаётся своим маршрутом:
-// встроенный <style> политика содержимого запрещает, внешний источник — тоже.
-ui.get(\`/\${APP_STYLESHEET_PATH}\`, (context) => appStylesheetResponse(context.req.raw));
-
-// Название экрана приходит от роутера заголовком: владелец правит его на
-// платформе, и оно доезжает до зрителей без пересборки. Запасное значение —
-// имя из app.json: проба узла и локальный запуск идут мимо роутера.
-ui.get("/", (context) =>
-  context.html(
-    appPage({
-      title: appTitle(context.req.raw, ${JSON.stringify(name)}),
-      request: context.req.raw,${style === "iskra" ? "" : `\n      style: ${JSON.stringify(style)},`}
-      body: \`<section class="card card--pad"><p class="hint">Замени этот экран своим.</p></section>\`,
-    }),
-  ),
-);
-
-app.route(appBasePath(), ui);
-
-serve({ fetch: app.fetch, port: 8080 });
-`;

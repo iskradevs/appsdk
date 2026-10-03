@@ -18,6 +18,7 @@ import {
   scaffoldApp,
 } from "../dist/cli-core.js";
 import { APP_LAYOUTS } from "../dist/starter.js";
+import { authoringExample } from "./fixtures/authoring-example.mjs";
 
 const sdkRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const execFileAsync = promisify(execFile);
@@ -32,76 +33,19 @@ test("authoring examples are complete closed-set apps", async () => {
   }
 });
 
-// Узел проверяет кандидата на публикацию запросом в корень приложения СО
-// слэшем ("/{slug}/"), и роутер водит туда же зрителей. Hono по умолчанию
-// считает "/{slug}" и "/{slug}/" разными путями, поэтому строгий роутер
-// отвечает пробе 404 — приложение, собранное по образцу, не публикуется вовсе.
-// Проверка стоит на образцах: именно их копирует автор, и цена ошибки здесь —
-// не один сломанный экран, а каждое новое приложение.
-test("authoring templates mount the app on a slash-tolerant router", async () => {
-  const sources = [];
-  for (const name of ["minimal", "interactive", "stateful", ...layoutExamples]) {
-    sources.push([name, await readFile(join(sdkRoot, "examples", name, "src/server.ts"), "utf8")]);
-  }
-  const scaffoldRoot = await mkdtemp(join(tmpdir(), "iskra-sdk-scaffold-router-"));
-  await scaffoldApp(scaffoldRoot, { name: "demo" });
-  sources.push(["scaffold", await readFile(join(scaffoldRoot, "src/server.ts"), "utf8")]);
-
-  for (const [name, source] of sources) {
-    assert.match(
-      source,
-      /const app = new Hono\(\{ strict: false \}\);/,
-      `${name}: корневой роутер отвергнет "/{slug}/" и провалит гейт публикации`,
-    );
-  }
-});
-
-// Макет копирует `iskra-app init --layout`, подменяя имя и стиль по строкам
-// APP_NAME и APP_STYLE: вторая такая строка или её отсутствие сломали бы
-// заготовку. Политика содержимого запрещает атрибут style и встроенные
-// <script>/<style> — образец с ними показал бы автору неработающий приём.
-test("layout examples expose one name and style line and obey the content policy", async () => {
-  for (const id of APP_LAYOUTS) {
-    const root = join(sdkRoot, "examples", "layouts", id);
-    const manifest = JSON.parse(await readFile(join(root, "app.json"), "utf8"));
-    assert.equal(manifest.name, `layout-${id}`);
-    const source = await readFile(join(root, "src/server.ts"), "utf8");
-    assert.equal(
-      source.match(/^const APP_NAME = "[^"]*";$/gm)?.length,
-      1,
-      `${id}: строка APP_NAME обязана встретиться ровно один раз`,
-    );
-    assert.ok(source.includes(`const APP_NAME = "layout-${id}";`), `${id}: APP_NAME`);
-    assert.equal(
-      source.match(/^const APP_STYLE: AppStyle = "[^"]*";$/gm)?.length,
-      1,
-      `${id}: строка APP_STYLE обязана встретиться ровно один раз`,
-    );
-    assert.ok(source.includes('const APP_STYLE: AppStyle = "iskra";'), `${id}: APP_STYLE`);
-    assert.doesNotMatch(source, /\sstyle=/, `${id}: атрибут style запрещён политикой`);
-    assert.doesNotMatch(source, /<script(?![^>]*\ssrc=)|<style/, `${id}: встроенный код запрещён`);
-    assert.match(source, /request: context\.req\.raw/, `${id}: шапке нужен запрос зрителя`);
-  }
-});
-
 test("init --layout copies the layout example under the new name and style", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "iskra-sdk-layout-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await scaffoldApp(root, { name: "crm", layout: "table", style: "strict" });
   const manifest = JSON.parse(await readFile(join(root, "app.json"), "utf8"));
   assert.equal(manifest.name, "crm");
-  const source = await readFile(join(root, "src/server.ts"), "utf8");
-  assert.match(source, /^const APP_NAME = "crm";$/m);
-  assert.match(source, /^const APP_STYLE: AppStyle = "strict";$/m);
-  assert.doesNotMatch(source, /layout-table/);
-  const example = await readFile(join(sdkRoot, "examples/layouts/table/src/server.ts"), "utf8");
-  assert.equal(
-    source,
-    example
-      .replace('const APP_NAME = "layout-table";', 'const APP_NAME = "crm";')
-      .replace('const APP_STYLE: AppStyle = "iskra";', 'const APP_STYLE: AppStyle = "strict";'),
-  );
   await buildApp(root, { closedDependencies: true });
+  const fixture = await authoringExample(t, root);
+  const response = await fixture.request();
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<title>crm<\/title>/);
+  assert.match(html, /data-style="strict"/);
 });
 
 test("init without layout keeps the minimal scaffold wired to the viewer request", async (t) => {
@@ -110,12 +54,17 @@ test("init without layout keeps the minimal scaffold wired to the viewer request
   t.after(() => rm(plain, { recursive: true, force: true }));
   t.after(() => rm(showcase, { recursive: true, force: true }));
   await scaffoldApp(plain, { name: "plain" });
-  const plainSource = await readFile(join(plain, "src/server.ts"), "utf8");
-  assert.match(plainSource, /request: context\.req\.raw/);
-  assert.doesNotMatch(plainSource, /style: "/);
+  const plainFixture = await authoringExample(t, plain);
+  const plainHTML = await (
+    await plainFixture.request("", {
+      headers: { "x-iskra-app-title": encodeURIComponent("Владелец") },
+    })
+  ).text();
+  assert.match(plainHTML, /<title>Владелец<\/title>/);
+  assert.doesNotMatch(plainHTML, /data-style=/);
   await scaffoldApp(showcase, { name: "shiny", style: "showcase" });
-  const showcaseSource = await readFile(join(showcase, "src/server.ts"), "utf8");
-  assert.match(showcaseSource, /style: "showcase"/);
+  const showcaseFixture = await authoringExample(t, showcase);
+  assert.match(await (await showcaseFixture.request()).text(), /data-style="showcase"/);
   await buildApp(showcase, { closedDependencies: true });
 });
 
@@ -136,9 +85,22 @@ test("init CLI rejects an empty layout or style instead of the minimal scaffold"
   const root = await mkdtemp(join(tmpdir(), "iskra-sdk-empty-flag-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const cli = join(sdkRoot, "dist/cli.js");
-  for (const [flag, dir] of [["--layout", "a"], ["--style", "b"]]) {
+  for (const [flag, dir] of [
+    ["--layout", "a"],
+    ["--style", "b"],
+  ]) {
     await assert.rejects(
-      () => execFileAsync(process.execPath, [cli, "init", "--name", "x", "--path", join(root, dir), flag, ""]),
+      () =>
+        execFileAsync(process.execPath, [
+          cli,
+          "init",
+          "--name",
+          "x",
+          "--path",
+          join(root, dir),
+          flag,
+          "",
+        ]),
       (error) => {
         assert.match(error.stderr, /допустимы/);
         return true;
@@ -192,28 +154,22 @@ test("Stage F scenario fixture has two healthy versions and one exact failed pro
   assert.doesNotMatch(recipe, /ISKRA_API_KEY\s*=/);
 });
 
-test("CLI scaffolds, builds and deterministically packs a closed-set app", async () => {
+test("CLI scaffolds, builds and deterministically packs a closed-set app", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "iskra-sdk-cli-"));
   const project = join(root, "notes");
   await scaffoldApp(project, { name: "notes" });
-  const source = await readFile(join(project, "src", "server.ts"), "utf8");
-  assert.match(source, /app\.get\("\/healthz"/);
-  assert.match(source, /app\.route\(appBasePath\(\), ui\)/);
+  t.after(() => rm(root, { recursive: true, force: true }));
   const manifest = JSON.parse(await readFile(join(project, "app.json"), "utf8"));
   assert.equal(manifest.entry, "server.js");
-
-  // Каркас нового приложения обязан выходить оформленным: экран без стиля —
-  // это то, с чем автор остаётся, если слой подключается «по желанию».
-  assert.match(source, /appStylesheetResponse/);
-  assert.match(source, /appPage\(/);
-  assert.match(source, /appTitle\(/);
-
+  const fixture = await authoringExample(t, project);
+  assert.deepEqual(await (await fixture.health()).json(), { ok: true });
+  const page = await fixture.request();
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /<title>notes<\/title>/);
+  const stylesheet = await fixture.request("iskra.css");
+  assert.equal(stylesheet.status, 200);
+  assert.match(stylesheet.headers.get("content-type"), /text\/css/);
   const buildDir = await buildApp(project, { closedDependencies: true });
-  const bundle = await readFile(join(buildDir, "server.js"), "utf8");
-  assert.match(bundle, /healthz/);
-  // Общий слой едет внутри бандла, а не подтягивается с узла: вид published
-  // версии не меняется от того, что платформу обновили.
-  assert.match(bundle, /--accent:/);
   const first = join(root, "first.zip");
   const second = join(root, "second.zip");
   await packApp(buildDir, first);
@@ -285,22 +241,32 @@ for (const variant of ["extensionless", "directory-index", "directory-main", "no
     t.after(() => rm(parent, { recursive: true, force: true }));
     const project = join(parent, "project");
     await scaffoldApp(project, { name: "closed-boundary" });
-    const outside = variant === "node-modules-link"
-      ? join(project, "node_modules", "unapproved", "payload.ts")
-      : join(parent, "payload.ts");
+    const outside =
+      variant === "node-modules-link"
+        ? join(project, "node_modules", "unapproved", "payload.ts")
+        : join(parent, "payload.ts");
     await mkdir(dirname(outside), { recursive: true });
     await writeFile(outside, 'export const payload = "outside source root";');
     if (variant === "directory-index" || variant === "directory-main") {
       await mkdir(join(project, "src", "payload"));
       await symlink(outside, join(project, "src", "payload", "index.ts"));
       if (variant === "directory-main") {
-        await writeFile(join(project, "src", "payload", "package.json"), JSON.stringify({ main: "index.ts" }));
+        await writeFile(
+          join(project, "src", "payload", "package.json"),
+          JSON.stringify({ main: "index.ts" }),
+        );
       }
     } else {
       await symlink(outside, join(project, "src", "payload.ts"));
     }
-    await writeFile(join(project, "src", "server.ts"), 'import { payload } from "./payload"; console.log(payload);');
-    await assert.rejects(() => buildApp(project, { closedDependencies: true }), /вне проекта|node_modules/);
+    await writeFile(
+      join(project, "src", "server.ts"),
+      'import { payload } from "./payload"; console.log(payload);',
+    );
+    await assert.rejects(
+      () => buildApp(project, { closedDependencies: true }),
+      /вне проекта|node_modules/,
+    );
   });
 }
 
@@ -311,7 +277,10 @@ test("closed build accepts extensionless and directory imports within source roo
   await mkdir(join(project, "src", "folder"));
   await writeFile(join(project, "src", "value.ts"), 'export const value = "allowed";');
   await writeFile(join(project, "src", "folder", "index.ts"), 'export { value } from "../value";');
-  await writeFile(join(project, "src", "server.ts"), 'import { value } from "./folder"; console.log(value);');
+  await writeFile(
+    join(project, "src", "server.ts"),
+    'import { value } from "./folder"; console.log(value);',
+  );
   await buildApp(project, { closedDependencies: true });
   assert.match(await readFile(join(project, ".iskra-build", "server.js"), "utf8"), /allowed/);
 });
@@ -354,10 +323,9 @@ test("packed SDK builds with hoisted dependencies but keeps user imports closed"
   // Макеты читаются из examples установленного пакета: путь от dist/cli-core.js.
   const layoutProject = join(root, "layout-project");
   await installedCore.scaffoldApp(layoutProject, { name: "packed-layout", layout: "wizard" });
-  assert.match(
-    await readFile(join(layoutProject, "src/server.ts"), "utf8"),
-    /^const APP_NAME = "packed-layout";$/m,
-  );
+  await installedCore.buildApp(layoutProject, { closedDependencies: true });
+  const installedFixture = await authoringExample(t, layoutProject);
+  assert.match(await (await installedFixture.request()).text(), /<title>packed-layout<\/title>/);
 
   await writeFile(join(root, "src/server.ts"), 'import Ajv from "ajv"; console.log(Ajv);');
   await assert.rejects(
@@ -631,7 +599,10 @@ test("CLI probe failure raises a typed error with durable app identity", async (
   const fetch = async () => {
     calls += 1;
     if (calls === 1) {
-      return Response.json({ id: "app-probe", version: "1.2.3", state: "probing" }, { status: 202 });
+      return Response.json(
+        { id: "app-probe", version: "1.2.3", state: "probing" },
+        { status: 202 },
+      );
     }
     return Response.json({
       publication: { version: "1.2.3", state: "pending", probe_error: "healthz вернул 503" },
@@ -661,7 +632,10 @@ test("CLI retries transient poll failures and still reaches the terminal state",
   const fetch = async () => {
     calls += 1;
     if (calls === 1) {
-      return Response.json({ id: "app-flaky", version: "1.0.0", state: "probing" }, { status: 202 });
+      return Response.json(
+        { id: "app-flaky", version: "1.0.0", state: "probing" },
+        { status: 202 },
+      );
     }
     if (calls === 2) return Response.json({ detail: "bad gateway" }, { status: 502 });
     if (calls === 3) throw new TypeError("fetch failed");
@@ -731,19 +705,16 @@ test("CLI rejects unknown flags on every subcommand", async () => {
     ["publish", "--appid", "app-1"],
   ];
   for (const [command, ...badArgs] of cases) {
-    await assert.rejects(
-      execFileAsync(process.execPath, [cli, command, ...badArgs]),
-      (error) => {
-        assert.equal(error.code, 1, `${command}: ожидался ненулевой exit-код`);
-        assert.match(error.stderr, /неизвестный аргумент/, `${command}: stderr=${error.stderr}`);
-        assert.ok(
-          error.stderr.includes(badArgs[0]),
-          `${command}: stderr должен назвать ${badArgs[0]}: ${error.stderr}`,
-        );
-        assert.match(error.stderr, /допустимо/, `${command}: stderr без подсказки`);
-        return true;
-      },
-    );
+    await assert.rejects(execFileAsync(process.execPath, [cli, command, ...badArgs]), (error) => {
+      assert.equal(error.code, 1, `${command}: ожидался ненулевой exit-код`);
+      assert.match(error.stderr, /неизвестный аргумент/, `${command}: stderr=${error.stderr}`);
+      assert.ok(
+        error.stderr.includes(badArgs[0]),
+        `${command}: stderr должен назвать ${badArgs[0]}: ${error.stderr}`,
+      );
+      assert.match(error.stderr, /допустимо/, `${command}: stderr без подсказки`);
+      return true;
+    });
   }
 });
 
@@ -819,7 +790,6 @@ test("CLI bounds the initial publication request with the terminal deadline", as
   assert.equal(receivedSignal, true);
 });
 
-
 test("packed SDK public types compile in a bare consumer without Node ambient types", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "iskra-sdk-bare-types-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -827,14 +797,32 @@ test("packed SDK public types compile in a bare consumer without Node ambient ty
   const consumer = join(root, "consumer");
   await mkdir(artifacts);
   await mkdir(consumer);
-  const { stdout } = await execFileAsync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", artifacts], { cwd: sdkRoot });
+  const { stdout } = await execFileAsync(
+    "npm",
+    ["pack", "--json", "--ignore-scripts", "--pack-destination", artifacts],
+    { cwd: sdkRoot },
+  );
   const [{ filename }] = JSON.parse(stdout);
-  await writeFile(join(consumer, "package.json"), JSON.stringify({
-    name: "bare-sdk-type-consumer", version: "1.0.0", private: true, type: "module",
-  }));
-  await execFileAsync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", join(artifacts, filename)], { cwd: consumer });
-  await assert.rejects(readFile(join(consumer, "node_modules/@types/node/package.json")), { code: "ENOENT" });
-  await writeFile(join(consumer, "consumer.ts"), `
+  await writeFile(
+    join(consumer, "package.json"),
+    JSON.stringify({
+      name: "bare-sdk-type-consumer",
+      version: "1.0.0",
+      private: true,
+      type: "module",
+    }),
+  );
+  await execFileAsync(
+    "npm",
+    ["install", "--ignore-scripts", "--no-audit", "--no-fund", join(artifacts, filename)],
+    { cwd: consumer },
+  );
+  await assert.rejects(readFile(join(consumer, "node_modules/@types/node/package.json")), {
+    code: "ENOENT",
+  });
+  await writeFile(
+    join(consumer, "consumer.ts"),
+    `
 import { IskraAPIError, appBasePath, appDataPath, type IskraAPIErrorMetadata } from "@iskra/apps";
 const metadata: IskraAPIErrorMetadata = { title: "Busy", detail: "", requestId: "req", retryAfter: "5" };
 const old: Error = new IskraAPIError(400, "invalid", "Invalid");
@@ -844,13 +832,24 @@ const env = Object.freeze({ APP_BASE_PATH: "/notes/", DATA_DIR: "/data" });
 const basePath: string = appBasePath(env);
 const dataPath: string = appDataPath("notes.sqlite", env);
 void [old, requestId, basePath, dataPath];
-`);
-  await writeFile(join(consumer, "tsconfig.json"), JSON.stringify({
-    compilerOptions: {
-      strict: true, exactOptionalPropertyTypes: true, module: "NodeNext", moduleResolution: "NodeNext",
-      target: "ES2022", types: [], noEmit: true,
-    },
-    files: ["consumer.ts"],
-  }));
-  await execFileAsync("npx", ["--no-install", "tsc", "--project", "tsconfig.json"], { cwd: consumer });
+`,
+  );
+  await writeFile(
+    join(consumer, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        exactOptionalPropertyTypes: true,
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        target: "ES2022",
+        types: [],
+        noEmit: true,
+      },
+      files: ["consumer.ts"],
+    }),
+  );
+  await execFileAsync("npx", ["--no-install", "tsc", "--project", "tsconfig.json"], {
+    cwd: consumer,
+  });
 });

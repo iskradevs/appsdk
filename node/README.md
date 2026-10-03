@@ -4,7 +4,7 @@
 Искре. Нужны **Node.js 24**, TypeScript и ESM. Приложение получает собственный
 каталог `/data`, базовый URL path и доступ к API Искры от среды исполнения.
 
-Preview **0.1.1** готовится для предстоящего облачного релиза Apps. Проверенный
+Preview **0.1.2** готовится для предстоящего облачного релиза Apps. Проверенный
 пакет распространяется через [GitHub Releases](https://github.com/iskradevs/appsdk/releases).
 Публикация в npm оформляется отдельно.
 
@@ -14,7 +14,7 @@ Preview **0.1.1** готовится для предстоящего облач�
 
 ```bash
 npm init -y
-npm install https://github.com/iskradevs/appsdk/releases/download/v0.1.1/iskra-apps-0.1.1.tgz
+npm install https://github.com/iskradevs/appsdk/releases/download/v0.1.2/iskra-apps-0.1.2.tgz
 npx iskra-app init --name my-app --path ./my-app --layout form --style iskra
 npx iskra-app check --path ./my-app
 npx iskra-app pack --path ./my-app --output ./my-app.zip --closed
@@ -27,6 +27,28 @@ npx iskra-app pack --path ./my-app --output ./my-app.zip --closed
 CLI также предоставляет `build` и `publish`; допустимые аргументы выводятся
 при вызове `iskra-app` без команды. Выбор макета: `form`, `table`, `dashboard`,
 `master-detail`, `sidebar`, `wizard`; стиля: `iskra`, `strict`, `showcase`.
+
+## Авторский проект и сборка
+
+`init` создаёт модульный проект: `src/server.ts` запускает сервер и подключает
+маршруты, `src/config.ts` задаёт имя и стиль, `routes.ts` содержит обработчики,
+`views.ts` — HTML экранов. Данные и операции размещаются в отдельных модулях
+по потребности. Браузерный JavaScript находится в `static/`; интерактивный
+пример подключает `static/screen.js` внешним `script src`.
+
+Редактируйте авторский `app.json`, `src/**` и `static/**`, затем повторяйте
+`pack`. Команды `pack` и `publish` собирают runtime в собственном временном
+каталоге и очищают его при успехе и ошибке. Результат — ZIP с `server.js`,
+runtime-манифестом и браузерными файлами. Для локальной проверки распакуйте
+именно этот ZIP во временный каталог и запускайте `node server.js` из него:
+так относительные пути к `static/` совпадут с окружением публикации.
+
+Явный `build` сохраняет результат в `.iskra-build` для ручной работы.
+Программный `buildApp` принимает свой каталог через `outDir`. При следующем `pack` или `publish` SDK проверит прежнюю `.iskra-build`
+и удалит её после готового ZIP, если это runtime того же приложения.
+Неизвестные файлы, чужой манифест и symlinks сохраняются с диагностикой:
+разберите их содержимое и переместите нужные файлы перед повторной сборкой.
+Выходной ZIP выбирайте за пределами `.iskra-build`.
 
 ## Среда исполнения
 
@@ -72,7 +94,7 @@ JWKS запрашивается через явный служебный API URL
 `viewer.profileId` определяет рабочий контекст запроса. Router перепроверяет
 живой доступ к приложению, а backend повторно проверяет authority API-запросов.
 
-`IskraAPIError` содержит HTTP status, machine code и message. Версия 0.1.1 также
+`IskraAPIError` содержит HTTP status, machine code и message. Версия 0.1.2 также
 сохраняет Problem metadata и response request ID/Retry-After; код приложения
 принимает решение о повторе. `POST` автоматически не повторяется. Для повторяемых
 операций используйте контрактный idempotency key.

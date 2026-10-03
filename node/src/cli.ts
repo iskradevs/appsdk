@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import {
   buildApp,
   checkApp,
-  packApp,
+  packProject,
   PublicationFailedError,
   publishApp,
   scaffoldApp,
@@ -50,8 +50,9 @@ async function main(): Promise<void> {
     case "pack": {
       const parsed = parseArgs(command, args, ["--path", "--output"], ["--closed"]);
       const path = pathOf(parsed);
-      const buildDir = await buildApp(path, { closedDependencies: closedBuild(parsed) });
-      await packApp(buildDir, resolve(parsed.values.get("--output") ?? `${path}.zip`));
+      await packProject(path, resolve(parsed.values.get("--output") ?? `${path}.zip`), {
+        closedDependencies: closedBuild(parsed),
+      });
       break;
     }
     case "source-pack": {
@@ -77,8 +78,7 @@ async function main(): Promise<void> {
       if (!apiUrl || !apiKey)
         throw new Error("publish требует --api-url/ISKRA_API_URL и ISKRA_API_KEY");
       const output = resolve(parsed.values.get("--output") ?? `${path}.zip`);
-      const buildDir = await buildApp(path, { closedDependencies: closedBuild(parsed) });
-      await packApp(buildDir, output);
+      await packProject(path, output, { closedDependencies: closedBuild(parsed) });
       const appId = parsed.values.get("--app-id");
       const result = await publishApp(output, {
         apiUrl,
