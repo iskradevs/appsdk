@@ -4,7 +4,7 @@
 Искре. Нужны **Node.js 24**, TypeScript и ESM. Приложение получает собственный
 каталог `/data`, базовый URL path и доступ к API Искры от среды исполнения.
 
-Preview **0.1.2** готовится для предстоящего облачного релиза Apps. Проверенный
+Preview **0.1.3** включает инструкцию по интеллектуальным вызовам. Проверенный
 пакет распространяется через [GitHub Releases](https://github.com/iskradevs/appsdk/releases).
 Публикация в npm оформляется отдельно.
 
@@ -14,7 +14,7 @@ Preview **0.1.2** готовится для предстоящего облач�
 
 ```bash
 npm init -y
-npm install https://github.com/iskradevs/appsdk/releases/download/v0.1.2/iskra-apps-0.1.2.tgz
+npm install https://github.com/iskradevs/appsdk/releases/download/v0.1.3/iskra-apps-0.1.3.tgz
 npx iskra-app init --name my-app --path ./my-app --layout form --style iskra
 npx iskra-app check --path ./my-app
 npx iskra-app pack --path ./my-app --output ./my-app.zip --closed
@@ -27,6 +27,14 @@ npx iskra-app pack --path ./my-app --output ./my-app.zip --closed
 CLI также предоставляет `build` и `publish`; допустимые аргументы выводятся
 при вызове `iskra-app` без команды. Выбор макета: `form`, `table`, `dashboard`,
 `master-detail`, `sidebar`, `wizard`; стиля: `iskra`, `strict`, `showcase`.
+
+При создании приложения `app.json.access: "public"` выбирает внешнюю
+публикацию напрямую по текущему праву владельца. Scope ключа `apps:publish`
+и право внешней публикации проверяются отдельно; подготовка `private/org`
+от этого права не зависит. CLI различает `ready`, `ready_not_active` и
+`probing`: готовая версия с невыполненной запрошенной активацией сохраняется,
+а после возврата права владелец активирует её явно. Exact status принятой
+версии хранит исходный outcome даже после смены текущей версии и прунинга.
 
 ## Авторский проект и сборка
 
@@ -98,6 +106,46 @@ JWKS запрашивается через явный служебный API URL
 сохраняет Problem metadata и response request ID/Retry-After; код приложения
 принимает решение о повторе. `POST` автоматически не повторяется. Для повторяемых
 операций используйте контрактный idempotency key.
+
+## Анализ, генерация и документы
+
+Приложение вызывает агента Искры от имени вошедшего зрителя. Для короткой
+задачи используйте `iskra.run(body, { idempotencyKey })`; для длительной —
+`iskra.startRun(body, { idempotencyKey })` и `iskra.getRun(runId)`.
+`startRun` возвращает `runId`, пока агент продолжает работу. При `completed`
+исходный ответ находится в `result.answer`, JSON по переданному
+`response_format: { type: "json_schema", json_schema: schema }` — в
+`result.output`. Сама схема передаётся без обёртки `{ name, schema }`;
+нужные поля опишите и в `message`, поскольку форматирование идёт после агента.
+
+Сервер использует `ISKRA_API_URL` из среды и JWT текущего HTTP-запроса.
+JWT живёт до пяти минут, поэтому длительный опрос организуйте запросами
+браузера к своему серверу: каждый запрос получает свежий `X-Iskra-Identity`.
+`progress()` подходит для ожидания в пределах срока текущего токена;
+запуск новых задач и чтение результатов требуют действующей сессии зрителя.
+
+Для PDF есть multipart `POST /api/v1/chat/files` с частью `file` и именем
+файла; SDK пока не содержит upload-helper. Ответ даёт `conversation_id` и
+`files[].id`, которые передаются в chat/runs. Тот же JWT используется как
+Bearer. Пример полного пути и таблица отказов — в короткой
+[инструкции для ЭПС](INTELLIGENCE.md).
+
+App API предоставляет chat/files/runs и точечное чтение слотов секретов
+приложения. Каталоги навыков, Память, веб-поиск и OpenAI `/v1` через эту
+границу недоступны. App-прогон работает с документами и навыками из
+`APPS_HEADLESS_SKILL_ALLOWLIST` (точные `bundle@version`); возможности навыков
+ограничены artifact/files/LLM/log/now/progress/random/run-files. Интеграции
+и секреты чатового навыка автоматически не переходят в приложение.
+
+До LLM-вызова проверяются баланс и квоты `daily_runs`, `daily_mt`,
+`max_run_mt`, `max_concurrent_runs`. Открывающаяся страница и успешная
+candidate probe сами по себе не подтверждают доступ к интеллекту:
+проверьте реальный run из пользовательской сессии. Ошибку разрешения
+`iskra-api` диагностирует администратор Apps NODE; публичный адрес контура
+не заменяет служебный маршрут с viewer JWT.
+
+Для внешнего сервиса с пользовательским ключом `isk_` применяется отдельный
+[API SDK](https://github.com/iskradevs/apisdk), со своими scopes и каталогами.
 
 ## Исходник и проверки
 

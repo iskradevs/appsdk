@@ -2,7 +2,7 @@
 
 Это воспроизводимый fixture для dev-сценария `apps`. Публикуйте его из личного
 профиля `user1@test.invalid`: этот пользователь должен остаться владельцем
-приложения `stage-f-demo`, чтобы public-переход самоодобрялся немедленно.
+приложения `stage-f-demo` и иметь право внешней публикации для public-перехода.
 Контур должен иметь включённые Apps runtime/viewer и разрешать popup для Искры.
 Локально используйте именно destructive production-like запуск
 `./local/run up --apps`: hot-reload `dev --apps` использует отдельный Vite/Caddy
@@ -46,8 +46,8 @@ node dist/cli.js pack --closed --path examples/stage-f-scenario/9.9.9-bad --outp
 
 Только если процесс/окно браузера был аварийно убит и cleanup не мог
 выполниться, вручную активируйте исходную ready-версию и верните исходный
-private/org access через UI. Если остался pending approval, отмените запрос;
-если fixture подготовлен не тем профилем, удалите локальное приложение штатным
+private/org access через UI. Если fixture подготовлен не тем профилем,
+удалите локальное приложение штатным
 способом и повторите публикацию от `user1@test.invalid`. Номера версий
 неизменяемы. `./local/run down --apps` сбрасывает control-plane/dev seed и
 compose-контейнеры узла, но не является полным node cleanup: созданные агентом

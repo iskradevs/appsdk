@@ -52,7 +52,6 @@ export interface PublishResult {
   readonly state: "ready" | "ready_not_active" | "probing";
   readonly currentVersion?: string;
   readonly activated: boolean;
-  readonly approvalPending: boolean;
 }
 
 export async function scaffoldApp(projectDir: string, options: ScaffoldOptions): Promise<void> {
@@ -341,7 +340,6 @@ export async function publishApp(
     version,
     state: "probing",
     activated: false,
-    approvalPending: false,
   };
 
   const basePollIntervalMs = options.pollIntervalMs ?? 1000;
@@ -474,24 +472,13 @@ function terminalPublicationResult(
       : outcome
         ? outcome === "activated"
         : currentVersion === version;
-  const publicState =
-    typeof payload.public === "object" && payload.public !== null
-      ? (payload.public as Record<string, unknown>)
-      : {};
-  const approvalPending =
-    typeof payload.approval_pending === "boolean"
-      ? payload.approval_pending
-      : outcome
-        ? outcome === "approval_pending"
-        : activateRequested &&
-          !activated &&
-          payload.access === "public" &&
-          (typeof payload.approved_version === "string"
-            ? payload.approved_version !== version
-            : publicState.approved_version !== version);
   const state =
-    approvalPending || (!outcome && activateRequested && !activated) ? "ready_not_active" : "ready";
-  return { appId, version, state, currentVersion, activated, approvalPending };
+    payload.state === "ready_not_active" ||
+    outcome === "not_activated" ||
+    (!outcome && payload.state !== "ready" && activateRequested && !activated)
+      ? "ready_not_active"
+      : "ready";
+  return { appId, version, state, currentVersion, activated };
 }
 
 function closedDependencyPlugin(projectRoot: string): Plugin {

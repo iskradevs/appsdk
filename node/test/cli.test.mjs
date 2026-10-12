@@ -386,7 +386,7 @@ test("CLI publishes with apps:publish API key and polls renderer result", async 
           ? { publication: { version: "1.0.0", state: "pending", activate_on_ready: true } }
           : {
               current_version: "1.0.0",
-              publication: { version: "1.0.0", state: "ready", activate_on_ready: true },
+              publication: { version: "1.0.0", state: "ready", activate_on_ready: true, outcome: "activated" },
             },
       ),
     );
@@ -427,7 +427,7 @@ test("CLI preserves --no-activate intent when creating an app", async () => {
   assert.equal(result.state, "ready");
 });
 
-test("CLI reports a ready version that public approval kept inactive", async () => {
+test("CLI reports a ready version whose requested public activation was denied", async () => {
   let calls = 0;
   const fetch = async () => {
     calls += 1;
@@ -437,8 +437,7 @@ test("CLI reports a ready version that public approval kept inactive", async () 
     return Response.json({
       access: "public",
       current_version: "1.0.0",
-      approved_version: "1.0.0",
-      publication: { version: "2.0.0", state: "ready", activate_on_ready: true },
+      publication: { version: "2.0.0", state: "ready", activate_on_ready: true, outcome: "not_activated" },
     });
   };
 
@@ -456,8 +455,50 @@ test("CLI reports a ready version that public approval kept inactive", async () 
     state: "ready_not_active",
     currentVersion: "1.0.0",
     activated: false,
-    approvalPending: true,
   });
+});
+
+for (const [state, currentVersion] of [["ready", "2.0.0"], ["pruned", "12.0.0"]]) {
+  test(`CLI preserves not_activated outcome after later changes to ${state} version`, async () => {
+    let calls = 0;
+    const fetch = async () => {
+      calls += 1;
+      if (calls === 1)
+        return Response.json({ id: "app-history", version: "2.0.0", state: "probing" }, { status: 202 });
+      return Response.json({
+        current_version: currentVersion,
+        publication: {
+          version: "2.0.0", state, activate_on_ready: false, outcome: "not_activated",
+        },
+      });
+    };
+    const result = await publishApp(new Blob(["bundle"]), {
+      apiUrl: "http://iskra.invalid", apiKey: "isk_secret", appId: "app-history",
+      pollIntervalMs: 1, timeoutMs: 1000, fetch,
+    });
+    assert.equal(result.state, "ready_not_active");
+    assert.equal(result.activated, false);
+    assert.equal(result.currentVersion, currentVersion);
+  });
+}
+
+test("CLI retains caller activation intent for a legacy null outcome", async () => {
+  let calls = 0;
+  const fetch = async () => {
+    calls += 1;
+    if (calls === 1)
+      return Response.json({ id: "app-legacy", version: "2.0.0", state: "probing" }, { status: 202 });
+    return Response.json({
+      current_version: "1.0.0",
+      publication: { version: "2.0.0", state: "ready", activate_on_ready: false },
+    });
+  };
+  const result = await publishApp(new Blob(["bundle"]), {
+    apiUrl: "http://iskra.invalid", apiKey: "isk_secret", appId: "app-legacy",
+    pollIntervalMs: 1, timeoutMs: 1000, fetch,
+  });
+  assert.equal(result.state, "ready_not_active");
+  assert.equal(result.activated, false);
 });
 
 test("CLI timeout after acceptance returns durable probing identifiers", async () => {
@@ -487,7 +528,6 @@ test("CLI timeout after acceptance returns durable probing identifiers", async (
     version: "3.0.0",
     state: "probing",
     activated: false,
-    approvalPending: false,
   });
 });
 
@@ -528,7 +568,6 @@ test("CLI resumes a terminal outcome from a pruned version tombstone", async () 
     state: "ready",
     currentVersion: "12.0.0",
     activated: false,
-    approvalPending: false,
   });
 });
 
@@ -566,7 +605,6 @@ test("CLI preserves activation outcome after a newer version becomes current", a
     state: "ready",
     currentVersion: "3.0.0",
     activated: true,
-    approvalPending: false,
   });
 });
 
@@ -641,7 +679,7 @@ test("CLI retries transient poll failures and still reaches the terminal state",
     if (calls === 3) throw new TypeError("fetch failed");
     return Response.json({
       current_version: "1.0.0",
-      publication: { version: "1.0.0", state: "ready", activate_on_ready: true },
+      publication: { version: "1.0.0", state: "ready", activate_on_ready: true, outcome: "activated" },
     });
   };
   const result = await publishApp(new Blob(["bundle"]), {
@@ -658,7 +696,6 @@ test("CLI retries transient poll failures and still reaches the terminal state",
     state: "ready",
     currentVersion: "1.0.0",
     activated: true,
-    approvalPending: false,
   });
 });
 
