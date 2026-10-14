@@ -1,12 +1,25 @@
 import { builtinModules } from "node:module";
 import { createWriteStream } from "node:fs";
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { build, type Plugin } from "esbuild";
 import { ZipFile } from "yazl";
+import { z, type ZodType } from "zod";
 
 import { parseManifest } from "./manifest.js";
 import {
@@ -37,14 +50,16 @@ export interface BuildOptions {
   readonly closedDependencies?: boolean;
 }
 export type PackOptions = Omit<BuildOptions, "outDir">;
-export interface PublishOptions {
+export interface AppAPIOptions {
   readonly apiUrl: string;
   readonly apiKey: string;
+  readonly timeoutMs?: number;
+  readonly fetch?: typeof globalThis.fetch;
+}
+export interface PublishOptions extends AppAPIOptions {
   readonly appId?: string;
   readonly activate?: boolean;
   readonly pollIntervalMs?: number;
-  readonly timeoutMs?: number;
-  readonly fetch?: typeof globalThis.fetch;
 }
 export interface PublishResult {
   readonly appId: string;
@@ -52,6 +67,7 @@ export interface PublishResult {
   readonly state: "ready" | "ready_not_active" | "probing";
   readonly currentVersion?: string;
   readonly activated: boolean;
+  readonly viewerBaseUrl?: string;
 }
 
 export async function scaffoldApp(projectDir: string, options: ScaffoldOptions): Promise<void> {
@@ -81,7 +97,9 @@ export async function scaffoldApp(projectDir: string, options: ScaffoldOptions):
 // npm-пакет публикует examples рядом с dist; init использует те же примеры,
 // которые автор может скачать и собрать самостоятельно.
 const exampleDir = (layout: AppLayout | undefined): string =>
-  fileURLToPath(new URL(`../examples/${layout ? `layouts/${layout}` : "minimal"}`, import.meta.url));
+  fileURLToPath(
+    new URL(`../examples/${layout ? `layouts/${layout}` : "minimal"}`, import.meta.url),
+  );
 
 // Копируются все авторские src/** и static/** с исключительной записью;
 // имя и стиль подставляются только в модуль параметров.
@@ -189,7 +207,9 @@ export async function packProject(
         currentLegacy.device !== retireLegacy.device ||
         currentLegacy.inode !== retireLegacy.inode
       ) {
-        throw new Error(".iskra-build изменился во время сборки; проверь и перемести каталог перед упаковкой");
+        throw new Error(
+          ".iskra-build изменился во время сборки; проверь и перемести каталог перед упаковкой",
+        );
       }
       await rm(legacy, { recursive: true });
     }
@@ -303,45 +323,67 @@ export async function publishApp(
   bundle: Blob | Uint8Array | string,
   options: PublishOptions,
 ): Promise<PublishResult> {
-  if (!options.apiKey.startsWith("isk_") || !options.apiUrl)
-    throw new Error("apiUrl и API key формата isk_ обязательны");
-  const fetcher = options.fetch ?? globalThis.fetch;
-  const apiURL = options.apiUrl.replace(/\/+$/, "");
-  const timeoutMs = options.timeoutMs ?? defaultPublicationTimeoutMs;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-    throw new Error("timeoutMs обязан быть положительным конечным числом");
-  const deadline = Date.now() + timeoutMs;
+  const { fetcher, apiURL, deadline } = appAPIContext(options);
   const body = new FormData();
   body.set("bundle", await bundleBlob(bundle), "app.zip");
   const path = options.appId
     ? `/api/v1/apps/${encodeURIComponent(options.appId)}/versions`
     : "/api/v1/apps";
   const query = `?activate=${options.activate === false ? "false" : "true"}`;
-  const response = await fetchBeforePublicationDeadline(
-    fetcher,
-    `${apiURL}${path}${query}`,
-    {
-      method: "POST",
-      headers: { authorization: `Bearer ${options.apiKey}` },
-      body,
-    },
-    deadline,
-  );
-  const published = await jsonResponse(response);
-  if (!response.ok) throw publicationError(response.status, published);
-  const appId = requiredWireString(published.id, "id");
-  const version = requiredWireString(published.version, "version");
+  const knownIdentity = options.appId ? { appId: options.appId } : {};
+  let response: Response;
+  try {
+    response = await fetchBeforePublicationDeadline(
+      fetcher,
+      `${apiURL}${path}${query}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${options.apiKey}` },
+        body,
+      },
+      deadline,
+    );
+  } catch (error) {
+    // Ответ потерян: POST мог быть принят. Повтор выполняет вызывающий после
+    // проверки состояния; CLI сохраняет неизвестный исход без нового запроса.
+    const detail =
+      error instanceof PublicationTimeoutError
+        ? error.message
+        : "ответ публикации не получен; проверь состояние перед повторной отправкой";
+    throw new PublicationUnknownError(detail, knownIdentity);
+  }
+  const published = await jsonResponse(response, deadline);
+  const metadata = responseMetadata(response, published, knownIdentity);
+  if (!response.ok) throw new AppAPIError(publicationDetail(response.status, published), metadata);
+  const appId = nonemptyWireString(published?.id);
+  const version = nonemptyWireString(published?.version);
+  if (
+    !appId ||
+    !version ||
+    !["probing", "ready", "ready_not_active"].includes(String(published?.state))
+  ) {
+    throw new PublicationUnknownError(
+      "ответ публикации имеет неверный формат; проверь состояние перед повторной отправкой",
+      {
+        ...metadata,
+        code: "invalid_api_response",
+        ...(appId ? { appId } : {}),
+        ...(version ? { version } : {}),
+      },
+    );
+  }
   const activateRequested = options.activate !== false;
   if (response.status !== 202)
-    return terminalPublicationResult(published, appId, version, activateRequested);
+    return terminalPublicationResult(published!, appId, version, activateRequested);
 
-  const probing: PublishResult = {
+  let viewerBaseUrl = nonemptyWireString(published?.viewer_base_url);
+  const probingResult = (): PublishResult => ({
     appId,
     version,
     state: "probing",
     activated: false,
-  };
-
+    ...(viewerBaseUrl ? { viewerBaseUrl } : {}),
+  });
   const basePollIntervalMs = options.pollIntervalMs ?? 1000;
   let transientPollFailures = 0;
   while (Date.now() < deadline) {
@@ -355,50 +397,52 @@ export async function publishApp(
       statusResponse = await fetchBeforePublicationDeadline(
         fetcher,
         `${apiURL}/api/v1/apps/${encodeURIComponent(appId)}?version=${encodeURIComponent(version)}`,
-        {
-          method: "GET",
-          headers: { authorization: `Bearer ${options.apiKey}` },
-        },
+        { method: "GET", headers: { authorization: `Bearer ${options.apiKey}` } },
         deadline,
       );
     } catch (error) {
-      if (error instanceof PublicationTimeoutError) return probing;
-      // Публикация уже принята (202), сетевой сбой poll-а её не отменяет:
-      // продолжаем опрашивать с backoff до общего deadline.
+      if (error instanceof PublicationTimeoutError) return probingResult();
+      // После 202 сетевой сбой не отменяет принятую версию.
       transientPollFailures += 1;
       continue;
     }
-    const detail = await jsonResponse(statusResponse);
+    const detail = await jsonResponse(statusResponse, deadline);
     if (statusResponse.status >= 500) {
-      // Транзиентный сбой сервера (например 502) ретраится до deadline.
       transientPollFailures += 1;
       continue;
     }
+    const statusMetadata = responseMetadata(statusResponse, detail, { appId, version });
     if (!statusResponse.ok) {
-      // 4xx фатален сразу, но сохраняет durable identity принятой публикации.
       const failure = publicationDetail(statusResponse.status, detail);
       throw new PublicationFailedError(
         appId,
         version,
         failure,
         `публикация не выполнена: ${failure}`,
+        statusMetadata,
       );
     }
+    if (!detail) {
+      if (Date.now() >= deadline) return probingResult();
+      throw new PublicationFailedError(
+        appId,
+        version,
+        "ответ статуса имеет неверный формат",
+        "ответ статуса имеет неверный формат",
+        { ...statusMetadata, code: "invalid_api_response" },
+      );
+    }
+    viewerBaseUrl = nonemptyWireString(detail.viewer_base_url) ?? viewerBaseUrl;
     transientPollFailures = 0;
-    const publication =
-      typeof detail.publication === "object" && detail.publication !== null
-        ? (detail.publication as Record<string, unknown>)
-        : undefined;
+    const publication = objectRecord(detail.publication);
     if (
-      publication &&
-      publication.version === version &&
+      publication?.version === version &&
       (publication.state === "ready" || publication.state === "pruned")
     ) {
-      return terminalPublicationResult(detail, appId, version, activateRequested);
+      return terminalPublicationResult(detail, appId, version, activateRequested, viewerBaseUrl);
     }
     if (
-      publication &&
-      publication.version === version &&
+      publication?.version === version &&
       publication.state === "pending" &&
       typeof publication.probe_error === "string" &&
       publication.probe_error
@@ -408,10 +452,120 @@ export async function publishApp(
         version,
         publication.probe_error,
         `проверка публикации не пройдена: ${publication.probe_error}`,
+        statusMetadata,
       );
     }
   }
-  return probing;
+  return probingResult();
+}
+
+const accessResponseSchema = z.object({
+  id: z.string(),
+  access: z.enum(["private", "org", "public"]),
+  current_version: z.string().optional(),
+});
+
+const statusResponseSchema = accessResponseSchema.extend({
+  slug: z.string(),
+  title: z.string(),
+  status: z.enum(["draft", "active", "stopped"]),
+  viewer_base_url: z.string().optional(),
+  publication: z.object({
+    version: z.string(),
+    state: z.string(),
+    activate_on_ready: z.boolean(),
+    probe_error: z.string().optional(),
+    outcome: z.enum(["activated", "not_requested", "not_activated"]).optional(),
+  }),
+});
+
+// Однократное чтение точной версии возвращает проверенный DTO без преобразования.
+export async function getAppStatus(
+  appId: string,
+  version: string,
+  options: AppAPIOptions,
+): Promise<Record<string, unknown>> {
+  return appJSONRequest(
+    `/api/v1/apps/${encodeURIComponent(appId)}?version=${encodeURIComponent(version)}`,
+    { method: "GET" },
+    options,
+    { appId, version },
+    statusResponseSchema,
+  );
+}
+
+export type AppAccess = "private" | "org" | "public";
+
+export async function updateAppAccess(
+  appId: string,
+  access: AppAccess,
+  options: AppAPIOptions,
+): Promise<Record<string, unknown>> {
+  return appJSONRequest(
+    `/api/v1/apps/${encodeURIComponent(appId)}/access`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ access }),
+    },
+    options,
+    { appId },
+    accessResponseSchema,
+  );
+}
+
+async function appJSONRequest(
+  path: string,
+  init: RequestInit,
+  options: AppAPIOptions,
+  identity: AppAPIErrorMetadata,
+  responseSchema: ZodType,
+): Promise<Record<string, unknown>> {
+  const { fetcher, apiURL, deadline } = appAPIContext(options);
+  let response: Response;
+  try {
+    response = await fetchBeforePublicationDeadline(
+      fetcher,
+      `${apiURL}${path}`,
+      {
+        ...init,
+        headers: { ...init.headers, authorization: `Bearer ${options.apiKey}` },
+      },
+      deadline,
+    );
+  } catch (error) {
+    const detail =
+      error instanceof PublicationTimeoutError
+        ? "ответ API не получен за отведённое время"
+        : "ответ API не получен";
+    throw new AppAPIError(detail, identity);
+  }
+  const payload = await jsonResponse(response, deadline);
+  const metadata = responseMetadata(response, payload, identity);
+  if (!response.ok) throw new AppAPIError(publicationDetail(response.status, payload), metadata);
+  if (!payload || !responseSchema.safeParse(payload).success)
+    throw new AppAPIError("ответ API имеет неверный формат", {
+      ...metadata,
+      code: "invalid_api_response",
+    });
+  return payload;
+}
+
+function appAPIContext(options: AppAPIOptions): {
+  fetcher: typeof globalThis.fetch;
+  apiURL: string;
+  deadline: number;
+} {
+  if (!options.apiKey.startsWith("isk_") || !options.apiUrl)
+    throw new Error("apiUrl и API key формата isk_ обязательны");
+  const timeoutMs = options.timeoutMs ?? defaultPublicationTimeoutMs;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+    throw new Error("timeoutMs обязан быть положительным конечным числом");
+  return {
+    fetcher: options.fetch ?? globalThis.fetch,
+    apiURL: options.apiUrl.replace(/\/+$/, ""),
+    deadline: Date.now() + timeoutMs,
+  };
 }
 
 async function fetchBeforePublicationDeadline(
@@ -437,28 +591,62 @@ function publicationTimeoutError(): PublicationTimeoutError {
   return new PublicationTimeoutError("публикация не завершилась за отведённое время");
 }
 
-// Терминальный отказ публикации ПОСЛЕ того, как версия принята платформой:
-// appId и version уже durable, вызвавший агент может продолжить ремонт того же
-// приложения через publish --app-id вместо создания дубликата.
-export class PublicationFailedError extends Error {
-  readonly appId: string;
-  readonly version: string;
-  readonly detail: string;
+export interface AppAPIErrorMetadata {
+  readonly status?: number;
+  readonly code?: string;
+  readonly params?: Record<string, unknown>;
+  readonly requestId?: string;
+  readonly appId?: string;
+  readonly version?: string;
+}
 
-  constructor(appId: string, version: string, detail: string, message: string) {
+export class AppAPIError extends Error implements AppAPIErrorMetadata {
+  readonly detail: string;
+  readonly status?: number;
+  readonly code?: string;
+  readonly params?: Record<string, unknown>;
+  readonly requestId?: string;
+  readonly appId?: string;
+  readonly version?: string;
+
+  constructor(detail: string, metadata: AppAPIErrorMetadata = {}, message = detail) {
     super(message);
-    this.name = "PublicationFailedError";
-    this.appId = appId;
-    this.version = version;
+    this.name = "AppAPIError";
     this.detail = detail;
+    Object.assign(this, metadata);
+  }
+}
+
+export class PublicationUnknownError extends AppAPIError {
+  constructor(detail: string, metadata: AppAPIErrorMetadata = {}) {
+    super(detail, metadata);
+    this.name = "PublicationUnknownError";
+  }
+}
+
+// Терминальный отказ после приёма версии сохраняет durable identity для ремонта.
+export class PublicationFailedError extends AppAPIError {
+  declare readonly appId: string;
+  declare readonly version: string;
+
+  constructor(
+    appId: string,
+    version: string,
+    detail: string,
+    message: string,
+    metadata: AppAPIErrorMetadata = {},
+  ) {
+    super(detail, { ...metadata, appId, version }, message);
+    this.name = "PublicationFailedError";
   }
 }
 
 function terminalPublicationResult(
-  payload: Record<string, any>,
+  payload: Record<string, unknown>,
   appId: string,
   version: string,
   activateRequested: boolean,
+  acceptedViewerBaseUrl?: string,
 ): PublishResult {
   const currentVersion = typeof payload.current_version === "string" ? payload.current_version : "";
   const publication =
@@ -478,7 +666,15 @@ function terminalPublicationResult(
     (!outcome && payload.state !== "ready" && activateRequested && !activated)
       ? "ready_not_active"
       : "ready";
-  return { appId, version, state, currentVersion, activated };
+  const viewerBaseUrl = nonemptyWireString(payload.viewer_base_url) ?? acceptedViewerBaseUrl;
+  return {
+    appId,
+    version,
+    state,
+    currentVersion,
+    activated,
+    ...(viewerBaseUrl ? { viewerBaseUrl } : {}),
+  };
 }
 
 function closedDependencyPlugin(projectRoot: string): Plugin {
@@ -671,25 +867,72 @@ async function bundleBlob(bundle: Blob | Uint8Array | string): Promise<Blob> {
   return new Blob([bundle as Uint8Array<ArrayBuffer>], { type: "application/zip" });
 }
 
-async function jsonResponse(response: Response): Promise<Record<string, any>> {
-  return (await response.json().catch(() => ({}))) as Record<string, any>;
+async function jsonResponse(
+  response: Response,
+  deadline: number,
+): Promise<Record<string, unknown> | undefined> {
+  // Deadline охватывает тело ответа; медленный/оборванный JSON не превращает
+  // принятый POST в бессрочное ожидание и не выводится как сырой HTML/текст.
+  const remaining = Math.max(0, deadline - Date.now());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      response
+        .json()
+        .then(objectRecord)
+        .catch(() => undefined),
+      new Promise<undefined>((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout(undefined), remaining);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-function publicationError(status: number, payload: Record<string, any>): Error {
-  return new Error(`публикация не выполнена: ${publicationDetail(status, payload)}`);
+function responseMetadata(
+  response: Response,
+  payload: Record<string, unknown> | undefined,
+  identity: AppAPIErrorMetadata,
+): AppAPIErrorMetadata {
+  const params = objectRecord(payload?.params);
+  const code = nonemptyWireString(payload?.code);
+  const requestId =
+    nonemptyWireString(response.headers.get("x-request-id")) ??
+    nonemptyWireString(payload?.request_id);
+  const appId =
+    identity.appId ??
+    nonemptyWireString(payload?.app_id) ??
+    nonemptyWireString(payload?.id) ??
+    nonemptyWireString(params?.app_id);
+  const version =
+    identity.version ?? nonemptyWireString(payload?.version) ?? nonemptyWireString(params?.version);
+  return {
+    status: response.status,
+    ...(code ? { code } : {}),
+    ...(params ? { params } : {}),
+    ...(requestId ? { requestId } : {}),
+    ...(appId ? { appId } : {}),
+    ...(version ? { version } : {}),
+  };
 }
 
-function publicationDetail(status: number, payload: Record<string, any>): string {
-  return typeof payload.detail === "string" && payload.detail
-    ? payload.detail
-    : typeof payload.code === "string" && payload.code
-      ? payload.code
-      : `Искра ответила HTTP ${status}`;
+function publicationDetail(status: number, payload: Record<string, unknown> | undefined): string {
+  return (
+    nonemptyWireString(payload?.detail) ??
+    nonemptyWireString(payload?.code) ??
+    `Искра ответила HTTP ${status}`
+  );
 }
 
-function requiredWireString(value: unknown, name: string): string {
-  if (typeof value !== "string" || !value) throw new Error(`ответ публикации не содержит ${name}`);
-  return value;
+function nonemptyWireString(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function assertWithin(root: string, child: string, label: string): void {

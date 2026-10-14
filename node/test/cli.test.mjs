@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { mkdtemp } from "node:fs/promises";
 import test from "node:test";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 
 import {
   buildApp,
@@ -126,33 +127,76 @@ test("Stage F scenario fixture has two healthy versions and one exact failed pro
     await cp(sourceProject, project, { recursive: true });
     await buildApp(project, { closedDependencies: true });
 
-    const source = await readFile(join(sourceProject, "src", "server.ts"), "utf8");
+    const fixture = await authoringExample(t, project);
+    const health = await fixture.health();
+    assert.equal(health.status, version === "9.9.9-bad" ? 503 : 200);
+    const response = await fixture.request();
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    const nonce = "0123456789abcdef0123456789abcdef";
+    const returnOrigin = "https://platform.example.test";
+    const validURL = `https://apps.example.test/stage-f-demo/?iskra_stage_f_nonce=${nonce}&iskra_stage_f_return_origin=${encodeURIComponent(returnOrigin)}`;
+    const observed = stageFMessages(html, validURL);
     if (version === "9.9.9-bad") {
-      assert.match(source, /app\.get\("\/healthz"[^]*503/);
-      assert.doesNotMatch(source, /iskra-apps-stage-f-result/);
+      assert.deepEqual(observed.messages, []);
+      assert.equal(observed.frames.length, 0);
       continue;
     }
-    const markerPosition = source.indexOf("ISKRA_APPS_STAGE_F_OK");
-    const animationFramePosition = source.indexOf("requestAnimationFrame");
-    assert.ok(markerPosition >= 0, `${version}: visible marker is missing`);
-    assert.ok(
-      animationFramePosition > markerPosition,
-      `${version}: observation must start only after the marker is rendered`,
-    );
-    assert.match(source, /params\.get\("iskra_stage_f_nonce"\)/);
-    assert.match(source, /params\.get\("iskra_stage_f_return_origin"\)/);
-    assert.match(source, /type: "iskra-apps-stage-f-result"/);
-    assert.match(source, /value: "ISKRA_APPS_STAGE_F_OK"/);
-    assert.match(source, /nonce,/);
-    assert.match(source, /window\.opener\.postMessage\([^]*trustedOrigin/);
+    assert.deepEqual(observed.messages, [], "сообщение ожидает кадра отрисовки");
+    assert.equal(observed.frames.length, 1);
+    observed.frames[0]();
+    assert.deepEqual(JSON.parse(JSON.stringify(observed.messages)), [
+      {
+        data: { type: "iskra-apps-stage-f-result", value: "ISKRA_APPS_STAGE_F_OK", nonce },
+        origin: returnOrigin,
+      },
+    ]);
+    for (const query of [
+      "",
+      `?iskra_stage_f_nonce=bad&iskra_stage_f_return_origin=${encodeURIComponent(returnOrigin)}`,
+      `?iskra_stage_f_nonce=${nonce}&iskra_stage_f_return_origin=${encodeURIComponent(`${returnOrigin}/path`)}`,
+      `?iskra_stage_f_nonce=${nonce}&iskra_stage_f_return_origin=${encodeURIComponent("javascript:alert(1)")}`,
+    ]) {
+      const rejected = stageFMessages(html, `https://apps.example.test/stage-f-demo/${query}`);
+      for (const frame of rejected.frames) frame();
+      assert.deepEqual(rejected.messages, [], `небезопасные параметры: ${query}`);
+    }
+    const hidden = stageFMessages(html, validURL, false);
+    for (const frame of hidden.frames) frame();
+    assert.deepEqual(hidden.messages, [], "невидимый маркер не подтверждает отрисовку");
+    const noOpener = stageFMessages(html, validURL, true, false);
+    for (const frame of noOpener.frames) frame();
+    assert.deepEqual(noOpener.messages, [], "закрытый opener не получает подтверждение");
   }
-
-  const recipe = await readFile(join(fixtureRoot, "README.md"), "utf8");
-  assert.match(recipe, /user1@test\.invalid/);
-  assert.match(recipe, /1\.0\.0[^]*1\.1\.0[^]*9\.9\.9-bad/);
-  assert.match(recipe, /popup/i);
-  assert.doesNotMatch(recipe, /ISKRA_API_KEY\s*=/);
 });
+
+// Исполняется inline-скрипт из ответа реального Hono handler; DOM и следующий
+// animation frame заданы границей fixture, чтобы наблюдать postMessage.
+function stageFMessages(html, href, visible = true, hasOpener = true) {
+  const marker = /<p id="stage-f-marker">([^<]*)<\/p>/.exec(html);
+  const messages = [];
+  const frames = [];
+  const context = {
+    URL,
+    document: {
+      querySelector: () =>
+        marker
+          ? {
+              textContent: marker[1],
+              getClientRects: () => (visible ? [{}] : []),
+            }
+          : null,
+    },
+    window: {
+      location: { href },
+      opener: hasOpener ? { postMessage: (data, origin) => messages.push({ data, origin }) } : null,
+    },
+    requestAnimationFrame: (callback) => frames.push(callback),
+  };
+  for (const [, script] of html.matchAll(/<script>([^]*?)<\/script>/g))
+    runInNewContext(script, context);
+  return { messages, frames };
+}
 
 test("CLI scaffolds, builds and deterministically packs a closed-set app", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "iskra-sdk-cli-"));
@@ -386,7 +430,12 @@ test("CLI publishes with apps:publish API key and polls renderer result", async 
           ? { publication: { version: "1.0.0", state: "pending", activate_on_ready: true } }
           : {
               current_version: "1.0.0",
-              publication: { version: "1.0.0", state: "ready", activate_on_ready: true, outcome: "activated" },
+              publication: {
+                version: "1.0.0",
+                state: "ready",
+                activate_on_ready: true,
+                outcome: "activated",
+              },
             },
       ),
     );
@@ -437,7 +486,12 @@ test("CLI reports a ready version whose requested public activation was denied",
     return Response.json({
       access: "public",
       current_version: "1.0.0",
-      publication: { version: "2.0.0", state: "ready", activate_on_ready: true, outcome: "not_activated" },
+      publication: {
+        version: "2.0.0",
+        state: "ready",
+        activate_on_ready: true,
+        outcome: "not_activated",
+      },
     });
   };
 
@@ -458,23 +512,36 @@ test("CLI reports a ready version whose requested public activation was denied",
   });
 });
 
-for (const [state, currentVersion] of [["ready", "2.0.0"], ["pruned", "12.0.0"]]) {
+for (const [state, currentVersion] of [
+  ["ready", "2.0.0"],
+  ["pruned", "12.0.0"],
+]) {
   test(`CLI preserves not_activated outcome after later changes to ${state} version`, async () => {
     let calls = 0;
     const fetch = async () => {
       calls += 1;
       if (calls === 1)
-        return Response.json({ id: "app-history", version: "2.0.0", state: "probing" }, { status: 202 });
+        return Response.json(
+          { id: "app-history", version: "2.0.0", state: "probing" },
+          { status: 202 },
+        );
       return Response.json({
         current_version: currentVersion,
         publication: {
-          version: "2.0.0", state, activate_on_ready: false, outcome: "not_activated",
+          version: "2.0.0",
+          state,
+          activate_on_ready: false,
+          outcome: "not_activated",
         },
       });
     };
     const result = await publishApp(new Blob(["bundle"]), {
-      apiUrl: "http://iskra.invalid", apiKey: "isk_secret", appId: "app-history",
-      pollIntervalMs: 1, timeoutMs: 1000, fetch,
+      apiUrl: "http://iskra.invalid",
+      apiKey: "isk_secret",
+      appId: "app-history",
+      pollIntervalMs: 1,
+      timeoutMs: 1000,
+      fetch,
     });
     assert.equal(result.state, "ready_not_active");
     assert.equal(result.activated, false);
@@ -487,15 +554,22 @@ test("CLI retains caller activation intent for a legacy null outcome", async () 
   const fetch = async () => {
     calls += 1;
     if (calls === 1)
-      return Response.json({ id: "app-legacy", version: "2.0.0", state: "probing" }, { status: 202 });
+      return Response.json(
+        { id: "app-legacy", version: "2.0.0", state: "probing" },
+        { status: 202 },
+      );
     return Response.json({
       current_version: "1.0.0",
       publication: { version: "2.0.0", state: "ready", activate_on_ready: false },
     });
   };
   const result = await publishApp(new Blob(["bundle"]), {
-    apiUrl: "http://iskra.invalid", apiKey: "isk_secret", appId: "app-legacy",
-    pollIntervalMs: 1, timeoutMs: 1000, fetch,
+    apiUrl: "http://iskra.invalid",
+    apiKey: "isk_secret",
+    appId: "app-legacy",
+    pollIntervalMs: 1,
+    timeoutMs: 1000,
+    fetch,
   });
   assert.equal(result.state, "ready_not_active");
   assert.equal(result.activated, false);
@@ -679,7 +753,12 @@ test("CLI retries transient poll failures and still reaches the terminal state",
     if (calls === 3) throw new TypeError("fetch failed");
     return Response.json({
       current_version: "1.0.0",
-      publication: { version: "1.0.0", state: "ready", activate_on_ready: true, outcome: "activated" },
+      publication: {
+        version: "1.0.0",
+        state: "ready",
+        activate_on_ready: true,
+        outcome: "activated",
+      },
     });
   };
   const result = await publishApp(new Blob(["bundle"]), {
@@ -800,6 +879,7 @@ test("CLI publish prints durable identity when the probe fails", async (t) => {
   const structured = JSON.parse(failure.stdout.trim().split("\n").at(-1));
   assert.deepEqual(structured, {
     error: "app_publication_failed",
+    status: 200,
     app_id: "app-e2e",
     version: "0.1.0",
     detail: "healthz недоступен",

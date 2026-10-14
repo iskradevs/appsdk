@@ -38,3 +38,25 @@ test("viewer JWT принимает только EdDSA, issuer и единств
   await assert.rejects(() => verifyViewerIdentity(token({ aud: [appId, "other"] }), { appId, jwks }));
   await assert.rejects(() => verifyViewerIdentity(token({}, { alg: "HS256" }), { appId, jwks }));
 });
+
+test("viewer JWT принимает подписанные UUID тестовых профилей и организаций CORE", async () => {
+  const sub = "00000000-0000-0000-8000-000000000001";
+  const org = "00000000-0000-0000-1000-000000000001";
+  const identity = await verifyViewerIdentity(token({ sub, org }), { appId, jwks });
+  assert.deepEqual(identity, {
+    profileId: sub, sessionId: sid, organizationId: org, displayName: "Иван",
+  });
+  const privateProfile = "00000000-0000-0000-0000-000000000001";
+  assert.equal(
+    (await verifyViewerIdentity(token({ sub: privateProfile }), { appId, jwks })).profileId,
+    privateProfile,
+  );
+});
+
+test("viewer JWT отклоняет повреждённые идентификаторы в подписанных claims", async () => {
+  for (const claim of ["sub", "sid", "org"]) {
+    for (const value of ["not-a-uuid", "00000000000000008000000000000001", "00000000-0000-0000-8000-00000000000z"]) {
+      await assert.rejects(() => verifyViewerIdentity(token({ [claim]: value }), { appId, jwks }));
+    }
+  }
+});

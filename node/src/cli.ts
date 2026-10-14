@@ -2,12 +2,18 @@
 import { resolve } from "node:path";
 
 import {
+  AppAPIError,
+  type AppAPIOptions,
+  type AppAccess,
   buildApp,
   checkApp,
+  getAppStatus,
   packProject,
   PublicationFailedError,
+  PublicationUnknownError,
   publishApp,
   scaffoldApp,
+  updateAppAccess,
 } from "./cli-core.js";
 import { packSourceArchive } from "./source-archive.js";
 import { APP_LAYOUTS, APP_STYLES } from "./starter.js";
@@ -69,31 +75,71 @@ async function main(): Promise<void> {
       const parsed = parseArgs(
         command,
         args,
-        ["--path", "--api-url", "--output", "--app-id"],
+        ["--path", "--api-url", "--output", "--app-id", "--bundle"],
         ["--closed", "--no-activate"],
       );
-      const path = pathOf(parsed);
-      const apiUrl = parsed.values.get("--api-url") ?? process.env.ISKRA_API_URL;
-      const apiKey = process.env.ISKRA_API_KEY;
-      if (!apiUrl || !apiKey)
-        throw new Error("publish требует --api-url/ISKRA_API_URL и ISKRA_API_KEY");
-      const output = resolve(parsed.values.get("--output") ?? `${path}.zip`);
-      await packProject(path, output, { closedDependencies: closedBuild(parsed) });
+      const bundle = parsed.values.get("--bundle");
+      if (bundle !== undefined) {
+        const conflicts = ["--path", "--output"].filter((flag) => parsed.values.has(flag));
+        if (parsed.switches.has("--closed")) conflicts.push("--closed");
+        if (conflicts.length) throw new Error(`--bundle несовместим с ${conflicts.join(", ")}`);
+        if (!bundle) throw new Error("--bundle требует путь ZIP");
+      }
+      const credentials = apiOptions(command, parsed);
+      let output: string;
+      if (bundle !== undefined) {
+        output = resolve(bundle);
+      } else {
+        const path = pathOf(parsed);
+        output = resolve(parsed.values.get("--output") ?? `${path}.zip`);
+        await packProject(path, output, { closedDependencies: closedBuild(parsed) });
+      }
       const appId = parsed.values.get("--app-id");
       const result = await publishApp(output, {
-        apiUrl,
-        apiKey,
+        ...credentials,
         ...(appId ? { appId } : {}),
         activate: !parsed.switches.has("--no-activate"),
       });
-      process.stdout.write(`${JSON.stringify(result)}\n`);
+      writeJSON(result);
+      break;
+    }
+    case "status": {
+      const parsed = parseArgs(command, args, ["--app-id", "--version", "--api-url"], []);
+      const appId = requiredAppId(parsed);
+      const version = parsed.values.get("--version");
+      if (!version) throw new Error("status требует --version VERSION");
+      writeJSON(await getAppStatus(appId, version, apiOptions(command, parsed)));
+      break;
+    }
+    case "access": {
+      const parsed = parseArgs(command, args, ["--app-id", "--access", "--api-url"], []);
+      const appId = requiredAppId(parsed);
+      const access = parsed.values.get("--access");
+      if (!["private", "org", "public"].includes(access ?? ""))
+        throw new Error("access требует --access private|org|public");
+      writeJSON(await updateAppAccess(appId, access as AppAccess, apiOptions(command, parsed)));
       break;
     }
     default:
       throw new Error(
-        `использование: iskra-app init|check|build|pack|source-pack|publish [--path DIR]\n  ${INIT_USAGE}`,
+        `использование: iskra-app init|check|build|pack|source-pack|publish|status|access [аргументы]\n  ${INIT_USAGE}`,
       );
   }
+}
+
+function apiOptions(command: string, parsed: ParsedArgs): AppAPIOptions {
+  const apiUrl = parsed.values.get("--api-url") ?? process.env.ISKRA_API_URL;
+  const apiKey = process.env.ISKRA_API_KEY;
+  if (!apiUrl || !apiKey)
+    throw new Error(`${command} требует --api-url/ISKRA_API_URL и ISKRA_API_KEY`);
+  return { apiUrl, apiKey };
+}
+
+function requiredAppId(parsed: ParsedArgs): string {
+  const appId = parsed.values.get("--app-id");
+  if (!appId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(appId))
+    throw new Error("--app-id требует UUID приложения");
+  return appId;
 }
 
 function pathOf(parsed: ParsedArgs): string {
@@ -135,20 +181,57 @@ function parseArgs(
   return { values, switches };
 }
 
-main().catch((error: unknown) => {
-  if (error instanceof PublicationFailedError) {
-    // Структурный вывод сохраняет durable identity: вызвавший агент продолжает
-    // ремонт того же приложения через publish --app-id, не создавая дубликат.
-    process.stdout.write(
-      `${JSON.stringify({
-        error: "app_publication_failed",
-        app_id: error.appId,
-        version: error.version,
-        detail: error.detail,
-      })}\n`,
+// Вывод ограничен DTO и безопасными полями ошибки. Даже отражённый сервером
+// credential не должен попасть в stdout/stderr вызвавшего агента.
+function safeOutput(value: unknown): unknown {
+  if (typeof value === "string") {
+    const key = process.env.ISKRA_API_KEY;
+    const redacted = key ? value.replaceAll(key, "[redacted]") : value;
+    return redacted.replace(/\bBearer\s+\S+/gi, "[redacted]");
+  }
+  if (Array.isArray(value)) return value.map(safeOutput);
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(
+          ([key]) =>
+            !/^(authorization|proxy-authorization|headers|request(?:_?options|Init)?|api[_-]?key|token|secret)$/i.test(
+              key,
+            ),
+        )
+        .map(([key, item]) => [key, safeOutput(item)]),
     );
   }
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`iskra-app: ${message}\n`);
+  return value;
+}
+
+function writeJSON(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(safeOutput(value))}\n`);
+}
+
+main().catch((error: unknown) => {
+  if (error instanceof AppAPIError) {
+    writeJSON({
+      error:
+        error instanceof PublicationFailedError
+          ? "app_publication_failed"
+          : error instanceof PublicationUnknownError
+            ? "app_publication_unknown"
+            : "app_api_error",
+      app_id: error.appId,
+      version: error.version,
+      status: error.status,
+      code: error.code,
+      params: error.params,
+      request_id: error.requestId,
+      detail: error.detail,
+    });
+  }
+  const message = error instanceof Error ? error.message : "команда не выполнена";
+  // Одна строка без stack/cause или произвольного объекта транспортной ошибки.
+  const summary = String(safeOutput(message)).replace(/[\r\n\x00-\x1f\x7f]+/g, " ");
+  process.stderr.write(
+    `iskra-app: ${summary.length > 500 ? `${summary.slice(0, 500)}…` : summary}\n`,
+  );
   process.exitCode = 1;
 });

@@ -1,7 +1,9 @@
 import { createLocalJWKSet, createRemoteJWKSet, decodeProtectedHeader, jwtVerify, type JSONWebKeySet } from "jose";
 
 const issuer = "iskra-apps";
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// CORE хранит UUID, включая детерминированные идентификаторы DEV seed.
+// Проверяем каноническую запись; версия и variant не определяют права зрителя.
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface ViewerIdentity {
   readonly profileId: string;

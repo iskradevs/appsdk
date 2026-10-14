@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { appBasePath } from "@iskra/apps";
 import { Hono } from "hono";
 
-const app = new Hono();
+const app = new Hono({ strict: false });
 const ui = new Hono();
 
 app.get("/healthz", (context) => context.json({ ok: false, fixture: "probe_error" }, 503));
